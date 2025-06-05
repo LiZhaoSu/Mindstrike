@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Song Mindmap Generator</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f3f3f3;
+    }
+    #container {
+      margin: 40px auto;
+      max-width: 900px;
+      background: #fff;
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: 0 4px 20px #0001;
+    }
+    textarea {
+      width: 100%;
+      min-height: 160px;
+      font-size: 16px;
+      margin-bottom: 16px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 8px;
+    }
+    button {
+      font-size: 16px;
+      padding: 8px 32px;
+      border-radius: 6px;
+      border: none;
+      background: #2270ee;
+      color: #fff;
+      cursor: pointer;
+      margin-bottom: 20px;
+    }
+    #mindmapArea {
+      margin-top: 36px;
+      background: #efefef;
+      border-radius: 12px;
+      min-height: 600px;
+      overflow-x: auto;
+      padding: 16px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <h1>Song Mindmap Generator</h1>
+    <p>
+      Paste your song lyrics below and click "Generate Mindmap".<br>
+      The mindmap will highlight the main ideas and repeated lines.
+    </p>
+    <textarea id="lyricsInput" placeholder="Paste song lyrics here..."></textarea>
+    <br>
+    <button onclick="generateMindmap()">Generate Mindmap</button>
+    <div id="mindmapArea"></div>
+  </div>
+  <script src="mindmap.js"></script>
+</body>
+</html>
