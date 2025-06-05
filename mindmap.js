@@ -1,4 +1,4 @@
-// Song Mindmap Generator (Generalized)
+// Song Mindmap Generator (Generalized, Overlap-Fixed)
 
 function normalizeLine(line) {
   // Remove punctuation, trim and lowercase
@@ -130,19 +130,16 @@ function groupMindmapNodes(lyrics) {
   return mindmap;
 }
 
-// --------- Mindmap SVG Renderer ---------
+// --------- Mindmap SVG Renderer (Dynamic Layout, No Overlap) ---------
 function renderMindmap(mindmap) {
-  // Auto layout: vertical tree, root at top, branches below, children horizontal
+  // Dynamic layout: vertical tree, root at top, branches spaced to fit children
   const svgNS = 'http://www.w3.org/2000/svg';
   const padX = 24, padY = 16;
   const branchBoxW = 180, branchBoxH = 46;
   const childBoxW = 175, childBoxH = 38;
   const rootW = 500, rootH = 72;
-  const hSpacing = 22, vSpacing = 38;
-
-  const numBranches = mindmap.branches.length;
-  let svgH = Math.max(550, 110 + (branchBoxH+vSpacing)*numBranches + 100);
-  let svgW = 900;
+  const hSpacing = 22, vSpacing = 32;
+  const rootXPad = 24;
 
   // Helper: SVG box with text
   function box(x, y, w, h, text, opts={}) {
@@ -155,32 +152,63 @@ function renderMindmap(mindmap) {
     return {rect, txt, width:textW, height:h};
   }
 
+  // Compute layout: for each branch, compute subtree height
+  function branchSubtreeHeight(branch) {
+    if (branch.big) return branchBoxH + 20;
+    if (branch.children && branch.children.length > 0) {
+      return Math.max(branchBoxH, branch.children.length*(childBoxH+7));
+    }
+    return branchBoxH;
+  }
+
+  // Compute total tree height
+  let spacingBetweenBranches = 16;
+  const branchYs = [];
+  let totalBranchesHeight = 0;
+  mindmap.branches.forEach(branch => {
+    const height = branchSubtreeHeight(branch);
+    branchYs.push(height);
+    totalBranchesHeight += height + spacingBetweenBranches;
+  });
+  if (mindmap.branches.length > 0) totalBranchesHeight -= spacingBetweenBranches; // last one no extra space
+
+  // SVG size
+  let svgW = 900;
+  let svgH = Math.max(600, 170 + totalBranchesHeight + 80);
+
+  // Root position
+  let rootX = svgW/2 - rootW/2, rootY = 32;
+
   let elements = [];
   // Root box
-  let rootX = svgW/2 - rootW/2, rootY = 32;
   const root = box(rootX, rootY, rootW, rootH, mindmap.main, {fontSize:54, bold:true, minWidth:rootW});
   elements.push(root.rect, root.txt);
 
-  // Branches (vertical)
+  // Branches (vertical, with collision-avoiding layout)
   let startY = rootY + rootH + 40;
-  let branchYs = [];
+  let currentY = startY;
+
   mindmap.branches.forEach((branch, i) => {
-    let bx = rootX+24, by = startY + i*(branchBoxH+vSpacing);
-    branchYs.push(by);
+    let bx = rootX+rootXPad, by = currentY;
     // Branch box
     const bb = box(bx, by, branchBoxW, branchBoxH, branch.label, {fontSize:branch.big?48:26, big:branch.big, minWidth:branchBoxW});
     elements.push(bb.rect, bb.txt);
     // Connector from root to branch
     elements.push(`<path d="M${rootX+rootW/2} ${rootY+rootH} L${bx+branchBoxW/2} ${by}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
-    // Children (horizontal, rightwards)
+    // Children (horizontal, rightwards, vertically centered)
     if (branch.children && branch.children.length) {
+      let childrenTotalH = branch.children.length*(childBoxH+7) - 7;
+      let startCy = by + branchBoxH/2 - childrenTotalH/2;
       branch.children.forEach((child, j) => {
-        let cx = bx+branchBoxW+hSpacing, cy = by + j*(childBoxH+7);
+        let cx = bx+branchBoxW+hSpacing, cy = startCy + j*(childBoxH+7);
         const cb = box(cx, cy, childBoxW, childBoxH, child.label, {fontSize:18, minWidth:childBoxW});
         elements.push(cb.rect, cb.txt);
         // Connector from branch to child
         elements.push(`<path d="M${bx+branchBoxW} ${by+branchBoxH/2} L${cx} ${cy+childBoxH/2}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
       });
+      currentY += Math.max(branchBoxH, childrenTotalH) + spacingBetweenBranches;
+    } else {
+      currentY += branchBoxH + (branch.big ? 30 : spacingBetweenBranches);
     }
   });
 
