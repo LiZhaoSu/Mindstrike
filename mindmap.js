@@ -454,7 +454,7 @@ function renderMindmap(mindmap) {
 }
 
 // Main entry point
-window.generateMindmap = function() {
+function generateMindmap() {
   const lyrics = document.getElementById('lyricsInput').value;
   if (!lyrics.trim()) {
     document.getElementById('mindmapArea').innerHTML = '<p style="color:#c00">Please paste some lyrics first.</p>';
@@ -463,4 +463,12 @@ window.generateMindmap = function() {
   const mindmap = groupMindmapNodes(lyrics);
   const svg = renderMindmap(mindmap);
   document.getElementById('mindmapArea').innerHTML = svg;
-};
+}
+
+// Attach event listener after DOM is ready
+document.addEventListener("DOMContentLoaded", function() {
+  const btn = document.getElementById('generateBtn');
+  if (btn) {
+    btn.addEventListener('click', generateMindmap);
+  }
+});
