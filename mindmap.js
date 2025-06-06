@@ -1,4 +1,4 @@
-// Mindmap Generator: Clean branching, no duplicate text, auto-fit text, draggable map
+// Mindmap Generator: No duplicate child nodes, clean branching, draggable, fit text
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -142,6 +142,7 @@ function buildBranchingMindmapTree(lyrics) {
     // Check for repeated block
     let block = repeatedBlocks.find(b => b.start === i && blockFirstOccurrence[b.block] === i);
     if (block) {
+      // Only show once
       branches.push({
         children: block.textArr.map((t, j) => ({
           label: t
@@ -171,20 +172,29 @@ function buildBranchingMindmapTree(lyrics) {
       stemObj.idxArr[0] === i
     );
     if (stemObj) {
-      branches.push({
-        label: stemObj.stem,
-        children: stemObj.idxArr
-          .filter(idx => !usedIdx.has(idx))
-          .map(idx => {
-            const line = (lines[idx].type === "lyric" ? lines[idx].text : "");
-            // Remove the stem from the start to get the suffix
-            let suffix = line.trim().split(/\s+/).slice(stemObj.words).join(" ");
-            if (!suffix) suffix = "(...)";
-            return { label: suffix };
-          })
-      });
-      stemObj.idxArr.forEach(idx => usedIdx.add(idx));
-      continue;
+      // Only keep unique suffixes (no duplicate child nodes)
+      const uniqueSuffixes = new Set();
+      const childNodes = [];
+      stemObj.idxArr
+        .filter(idx => !usedIdx.has(idx))
+        .forEach(idx => {
+          const line = (lines[idx].type === "lyric" ? lines[idx].text : "");
+          let suffix = line.trim().split(/\s+/).slice(stemObj.words).join(" ");
+          if (!suffix) suffix = "(...)";
+          const normSuffix = normalizeLine(suffix);
+          if (!uniqueSuffixes.has(normSuffix)) {
+            childNodes.push({ label: suffix });
+            uniqueSuffixes.add(normSuffix);
+          }
+        });
+      if (childNodes.length > 0) {
+        branches.push({
+          label: stemObj.stem,
+          children: childNodes
+        });
+        stemObj.idxArr.forEach(idx => usedIdx.add(idx));
+        continue;
+      }
     }
 
     // Otherwise, add as a single line
@@ -202,13 +212,10 @@ function buildBranchingMindmapTree(lyrics) {
 
 // Helper: fit text to box, shrink font if needed
 function fitText(text, maxW, baseSize, minSize) {
-  // Estimate width: assume average character 0.6em
   const estW = text.length * baseSize * 0.62 + 18;
   if (estW <= maxW) return { font: baseSize, lines: [text] };
-  // Try to split to two lines if possible
   if (text.length > 18) {
     let idx = Math.floor(text.length / 2);
-    // Find a space near the middle
     for (let off = 0; off < 8; ++off) {
       if (text[idx - off] === " ") { idx = idx - off; break; }
       if (text[idx + off] === " ") { idx = idx + off; break; }
@@ -216,16 +223,13 @@ function fitText(text, maxW, baseSize, minSize) {
     let lines = [text.slice(0, idx).trim(), text.slice(idx).trim()];
     let estW1 = Math.max(lines[0].length, lines[1].length) * baseSize * 0.62 + 18;
     if (estW1 <= maxW) return { font: baseSize, lines };
-    // Shrink font if still too wide
     let shrink = Math.max(minSize, baseSize * maxW / estW1);
     return { font: shrink, lines };
   }
-  // Otherwise, just shrink font
   let shrink = Math.max(minSize, baseSize * maxW / estW);
   return { font: shrink, lines: [text] };
 }
 
-// SVG Renderer for branching lyrics mindmap, proper scaling, fit text, draggable
 function renderMindmap(mindmap) {
   const svgNS = 'http://www.w3.org/2000/svg';
   const rootW = 500, rootH = 72;
@@ -234,7 +238,6 @@ function renderMindmap(mindmap) {
   const vSpacing = 34, hSpacing = 32;
   const rootXPad = 24;
 
-  // Calculate max needed width and height for branches/children
   let maxBranchChildren = 0;
   mindmap.branches.forEach(branch => {
     if (branch.children && branch.children.length) {
@@ -247,12 +250,10 @@ function renderMindmap(mindmap) {
   let svgH = 220 + (mindmap.branches.length * (branchBoxH + vSpacing)) + 110;
 
   let elements = [];
-  // Root node
   let rootX = svgW / 2 - rootW / 2, rootY = 32;
   elements.push(`<rect x="${rootX}" y="${rootY}" width="${rootW}" height="${rootH}" rx="12" fill="#fff" stroke="#222" stroke-width="2"/>`);
   elements.push(`<text x="${rootX + rootW / 2}" y="${rootY + rootH / 2 + 20}" font-size="54" font-family="sans-serif" text-anchor="middle" font-weight="bold">${mindmap.main}</text>`);
 
-  // Branches
   let currentY = rootY + rootH + 56;
   mindmap.branches.forEach((branch, bi) => {
     let bx = rootX + rootXPad, by = currentY;
@@ -266,10 +267,8 @@ function renderMindmap(mindmap) {
       fontSize = 48;
     }
 
-    // Branch box
     elements.push(`<rect x="${bx}" y="${by}" width="${bbW}" height="${bbH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
 
-    // Branch label
     let branchLabel = branch.label || "";
     if (branch.big && branch.count > 1) {
       branchLabel += ` ×${branch.count}`;
@@ -281,21 +280,17 @@ function renderMindmap(mindmap) {
       if (fit.lines.length === 1) {
         elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[0]}</text>`);
       } else {
-        // Two lines
         elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 - 5}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[0]}</text>`);
         elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[1]}</text>`);
       }
     }
 
-    // Repeat mark for blocks (not for discourse marker)
     if (branch.repeat && !branch.big) {
       elements.push(`<text x="${bx + bbW - 20}" y="${by + bbH / 2 + 10}" font-size="21" font-family="sans-serif" text-anchor="end" fill="#888">×${branch.repeat}</text>`);
     }
 
-    // Connector from root to branch
     elements.push(`<path d="M${rootX + rootW / 2} ${rootY + rootH} L${bx + bbW / 2} ${by}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
 
-    // Children (horizontal, rightwards)
     if (branch.children && branch.children.length) {
       let childrenTotalH = branch.children.length * (childBoxH + 7) - 7;
       let startCy = by + bbH / 2 - childrenTotalH / 2;
@@ -306,11 +301,9 @@ function renderMindmap(mindmap) {
         if (fit.lines.length === 1) {
           elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[0]}</text>`);
         } else {
-          // Two lines
           elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[0]}</text>`);
           elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[1]}</text>`);
         }
-        // Connector from branch to child
         elements.push(`<path d="M${bx + bbW} ${by + bbH / 2} L${cx} ${cy + childBoxH / 2}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
       });
       currentY += Math.max(bbH, childrenTotalH) + vSpacing;
@@ -319,12 +312,9 @@ function renderMindmap(mindmap) {
     }
   });
 
-  // Surrounding box (scaled)
   elements.push(`<rect x="10" y="10" width="${svgW - 20}" height="${svgH - 20}" rx="22" fill="none" stroke="#222" stroke-width="3"/>`);
 
-  // SVG marker
   const marker = `<defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L7,4 L2,6 L4,4 L2,2" style="fill: #222;" /></marker></defs>`;
-  // Wrap in group for pan/drag
   return `
   <div id="mindmapSvgWrapper" style="width:100%;height:700px;overflow:auto;cursor:grab;">
   <svg id="mindmapSvg" width="${svgW}" height="${svgH}" xmlns="${svgNS}" style="background:#efefef;user-select:none">${marker}${elements.join('\n')}</svg>
@@ -341,7 +331,6 @@ function generateMindmap() {
   const svg = renderMindmap(mindmap);
   document.getElementById('mindmapArea').innerHTML = svg;
 
-  // Add drag-to-pan logic
   setTimeout(() => {
     const wrapper = document.getElementById("mindmapSvgWrapper");
     const svgEl = document.getElementById("mindmapSvg");
