@@ -1,4 +1,4 @@
-// Mindmap Generator: Maximal merging (deepest trees), vertical flow, horizontal split, arrows remain
+// Mindmap Generator: maximal prefix merging, repeated line handling, vertical flow
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -18,16 +18,17 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   return null;
 }
 
-// Find maximal common prefix (as array of words) for a group of lines
-function maximalCommonPrefix(lines) {
-  if (!lines.length) return [];
-  const splitLines = lines.map(l => l.trim().split(/\s+/));
-  const minLen = Math.min(...splitLines.map(arr => arr.length));
+// Maximal common prefix of arrays of words
+function maximalCommonPrefixArr(arrs) {
+  if (!arrs.length) return [];
   let prefix = [];
-  for (let i = 0; i < minLen; ++i) {
-    const word = splitLines[0][i];
-    if (splitLines.every(arr => arr[i] === word)) {
+  let idx = 0;
+  while (true) {
+    const word = arrs[0][idx];
+    if (word === undefined) break;
+    if (arrs.every(a => a[idx] === word)) {
       prefix.push(word);
+      idx++;
     } else {
       break;
     }
@@ -35,62 +36,22 @@ function maximalCommonPrefix(lines) {
   return prefix;
 }
 
-// Recursively merge lines into tree by maximal common prefix
-function mergeLinesToTree(nodes) {
-  if (nodes.length === 0) return [];
-  // If all are discourse nodes, return as is
-  if (nodes.every(n => n.type === "discourse")) {
-    return nodes.map(n => ({ ...n }));
-  }
-  // Filter out discourse nodes, process lyrics
-  const lyrics = nodes.filter(n => n.type !== "discourse");
-  const discourse = nodes.filter(n => n.type === "discourse");
-  if (lyrics.length === 0) return discourse.map(n => ({ ...n }));
-
-  // Get labels
-  const lines = lyrics.map(n => n.label);
-
-  // Find maximal common prefix
-  const mcp = maximalCommonPrefix(lines);
-
-  if (mcp.length === 0) {
-    // No merge possible, return each as a vertical node
-    return [
-      ...lyrics.map(n => ({ label: n.label })),
-      ...discourse.map(n => ({ ...n }))
-    ];
-  }
-
-  // Group by next word after prefix
-  const groups = {};
-  lyrics.forEach(n => {
-    const words = n.label.trim().split(/\s+/);
-    const suffixArr = words.slice(mcp.length);
-    const key = suffixArr.length === 0 ? "…" : suffixArr[0];
-    if (!groups[key]) groups[key] = [];
-    groups[key].push({
-      ...n,
-      label: suffixArr.join(" ") || "(...)"
-    });
-  });
-
-  // Compose node for the prefix, with children as branches
-  const children = Object.values(groups).map(groupArr => mergeLinesToTree(groupArr)[0]);
-  // Place discourse nodes as their own children at the end (to maintain order)
-  discourse.forEach(dn => children.push({ ...dn }));
-
-  return [{
-    label: mcp.join(" "),
-    children
-  }];
-}
-
+// Build the mindmap tree: maximal merging, repeated line handling
 function buildMindmapTree(lyrics) {
   const rawLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
   if (rawLines.length === 0) return { label: "Song", children: [] };
 
-  // Group lines into lyric/discourse nodes
-  const nodes = [];
+  // Index to handle repeated lines
+  const freq = {};
+  rawLines.forEach(line => {
+    const norm = normalizeLine(line);
+    if (!freq[norm]) freq[norm] = 0;
+    freq[norm]++;
+  });
+  const seen = {}; // for tracking first occurrences
+
+  // Discourse marker grouping
+  const lines = [];
   for (let i = 0; i < rawLines.length; ++i) {
     const dm = isDiscourseMarkerLine(rawLines[i]);
     if (dm) {
@@ -100,25 +61,118 @@ function buildMindmapTree(lyrics) {
         count += isDiscourseMarkerLine(rawLines[j], [dm.marker]).count;
         j++;
       }
-      nodes.push({ type: "discourse", label: dm.marker, big: true, count, idx: i });
+      lines.push({ type: "discourse", label: dm.marker, big: true, count, idx: i });
       i = j - 1;
     } else {
-      nodes.push({ type: "lyric", label: rawLines[i], idx: i });
+      lines.push({ type: "lyric", label: rawLines[i], idx: i });
     }
   }
 
-  // Build maximal merge tree
-  const tree = mergeLinesToTree(nodes);
+  // Recursively merge with repeat handling
+  function mergeNodes(nodes) {
+    if (nodes.length === 0) return [];
+    // If all are discourse nodes, emit as is
+    if (nodes.every(n => n.type === "discourse")) {
+      return nodes.map(n => ({ ...n }));
+    }
+    // Filter out discourse nodes, process lyrics
+    const lyrics = nodes.filter(n => n.type !== "discourse");
+    const discourse = nodes.filter(n => n.type === "discourse");
+    if (lyrics.length === 0) return discourse.map(n => ({ ...n }));
+
+    // Handle repeats: if a line has already been placed, emit a repeat marker instead
+    const lyricGroups = {};
+    lyrics.forEach(n => {
+      const norm = normalizeLine(n.label);
+      if (!lyricGroups[norm]) lyricGroups[norm] = [];
+      lyricGroups[norm].push(n);
+    });
+
+    // Reference node for repeats
+    function makeRefNode(label) {
+      return { label: label, repeatRef: true };
+    }
+
+    // Remove duplicates, but keep references for repeats
+    const uniqueLyrics = [];
+    Object.values(lyricGroups).forEach(group => {
+      const line = group[0].label;
+      const norm = normalizeLine(line);
+      if (!seen[norm]) {
+        seen[norm] = true;
+        uniqueLyrics.push(group[0]);
+      } else {
+        // This is a repeated line, add a reference node
+        uniqueLyrics.push(makeRefNode(line));
+      }
+    });
+
+    // Merge as much as possible using maximal common prefix
+    if (uniqueLyrics.length === 1) {
+      // Only one unique lyric, emit it (and any discourse markers after)
+      const lyricNode = uniqueLyrics[0].repeatRef
+        ? { label: uniqueLyrics[0].label, repeatRef: true }
+        : { label: uniqueLyrics[0].label };
+      return [
+        lyricNode,
+        ...discourse.map(n => ({ ...n }))
+      ];
+    }
+
+    // Find maximal common prefix
+    const splitArrs = uniqueLyrics.map(n => n.label.trim().split(/\s+/));
+    const prefix = maximalCommonPrefixArr(splitArrs);
+
+    if (prefix.length === 0) {
+      // No merge possible, emit each as vertical node (with repeat markers as needed)
+      return [
+        ...uniqueLyrics.map(n =>
+          n.repeatRef ? { label: n.label, repeatRef: true } : { label: n.label }
+        ),
+        ...discourse.map(n => ({ ...n }))
+      ];
+    }
+
+    // Group by the word after the prefix
+    const groups = {};
+    uniqueLyrics.forEach(n => {
+      const words = n.label.trim().split(/\s+/);
+      const suffixArr = words.slice(prefix.length);
+      const key = suffixArr.length === 0 ? "…" : suffixArr[0];
+      if (!groups[key]) groups[key] = [];
+      // If this is a repeat reference node, pass along the repeatRef property
+      if (n.repeatRef) {
+        groups[key].push({ label: suffixArr.join(" ") || "(...)", repeatRef: true });
+      } else {
+        groups[key].push({
+          label: suffixArr.join(" ") || "(...)"
+        });
+      }
+    });
+
+    // Compose node for the prefix, with children as horizontal bands
+    const children = Object.values(groups).map(groupArr => mergeNodes(groupArr)[0]);
+    // Place discourse nodes as their own children at the end (to maintain order)
+    discourse.forEach(dn => children.push({ ...dn }));
+
+    return [{
+      label: prefix.join(" "),
+      children
+    }];
+  }
+
+  // Build tree
+  const tree = mergeNodes(lines);
 
   // Use first lyric as root if possible
   let title = "Song";
-  for (const n of nodes) {
+  for (const n of lines) {
     if (n.type === "lyric") {
       title = n.label;
       break;
     }
   }
-  // If the root node is the same as title, extract its children and use as root's children
+  // If tree[0].label == title, use its children as root's children
   if (tree.length === 1 && tree[0].label === title && tree[0].children) {
     return { label: title, children: tree[0].children };
   }
@@ -188,16 +242,19 @@ function renderTree(x, y, rect, opts, elements, parentCenter = null) {
   let nodeX = x + (rect.width - boxW) / 2;
   let nodeY = y;
   // Draw box and label
-  elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
+  let boxStroke = node.repeatRef ? "#888" : "#222";
+  let boxDash = node.repeatRef ? 'stroke-dasharray="7,5"' : "";
+  elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="${boxStroke}" stroke-width="2" ${boxDash}/>`);
   let label = node.label || "";
   if (node.big && node.count > 1) label += ` ×${node.count}`;
+  if (node.repeatRef) label += " ↺";
   let fontSize = node.big ? 48 : 24;
   const fit = fitText(label, boxW - 18, fontSize, 13);
   if (fit.lines.length === 1) {
-    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : node.repeatRef ? "bold" : "normal"}" fill="${node.repeatRef ? "#888" : "#222"}">${fit.lines[0]}</text>`);
   } else {
-    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
-    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[1]}</text>`);
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : node.repeatRef ? "bold" : "normal"}" fill="${node.repeatRef ? "#888" : "#222"}">${fit.lines[0]}</text>`);
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : node.repeatRef ? "bold" : "normal"}" fill="${node.repeatRef ? "#888" : "#222"}">${fit.lines[1]}</text>`);
   }
   // Connect to parent
   if (parentCenter) {
@@ -213,7 +270,6 @@ function renderTree(x, y, rect, opts, elements, parentCenter = null) {
       let cx = x + (rect.width - rowW) / 2;
       for (let i = 0; i < row.length; ++i) {
         let ch = row[i];
-        // Arrow from parent to each child
         elements.push(`<path d="M${nodeX + boxW / 2} ${nodeY + boxH} L${cx + ch.width/2} ${cy}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
         renderTree(cx, cy, ch, opts, elements, null);
         cx += ch.width + opts.hSpacing;
