@@ -99,23 +99,135 @@ function groupMindmapNodes(lyrics) {
     }).slice(0, 4); // limit per branch
   }
 
-  // Add a branch for heavily repeated simple lines ("na", "la", "oh", etc)
-  const simpleVocalFreq = {};
+  // Improved: Add a branch for any repeated discourse marker lines (e.g. "na na na", "oh oh", etc)
+  // Define common discourse markers
+  const discourseMarkers = ["na", "la", "oh", "yeah", "woah", "hey", "uh", "woo", "ha", "mm"];
+  // Map of marker -> count of lines fully composed of that marker
+  const markerLines = {};
+  // Map of marker -> max number of repetitions in any line (for possible display/weighting)
+  const markerMaxRepeats = {};
+
   lines.forEach(line => {
-    const match = line.match(/^((na|la|oh|yeah|woah|hey)[ -]?)+$/i);
-    if (match) {
-      const key = match[0].toLowerCase();
-      simpleVocalFreq[key] = (simpleVocalFreq[key]||0) + 1;
-    }
+    // Normalize and split line to words
+    const normLine = normalizeLine(line);
+    // For each marker, check if line consists only of repetitions of the marker
+    discourseMarkers.forEach(marker => {
+      // Regex: the whole line is (marker + optional space/hyphen) repeated at least twice
+      const re = new RegExp(`^(${marker}[ -]?)+// Song Mindmap Generator (Generalized, Overlap-Fixed)
+
+function normalizeLine(line) {
+  // Remove punctuation, trim and lowercase
+  return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
+}
+
+function isSignificant(line) {
+  // Ignore short or trivial vocalizations
+  const trivial = ["oh", "yeah", "wow", "na", "la", "woah", "hey", "uh"];
+  const norm = normalizeLine(line);
+  return norm.length > 3 && !trivial.includes(norm);
+}
+
+function extractPhrases(lyrics) {
+  // Split lyrics into non-empty, non-section lines
+  const lines = lyrics.split(/\r?\n/).map(l => l.trim())
+    .filter(l => l && !l.match(/^\[.*\]$/));
+
+  // Count frequencies and preserve original form
+  const freq = {};
+  lines.forEach(line => {
+    const norm = normalizeLine(line);
+    if (!freq[norm]) freq[norm] = {count:0, orig:line};
+    freq[norm].count++;
   });
-  let topVocal = null;
-  let topVocalCount = 0;
-  for (const [vocal, count] of Object.entries(simpleVocalFreq)) {
-    if (count > topVocalCount) {
-      topVocal = vocal.trim();
-      topVocalCount = count;
+
+  // Get sorted list of significant lines
+  const sorted = Object.entries(freq)
+    .filter(([norm]) => isSignificant(norm))
+    .sort((a, b) => b[1].count - a[1].count);
+
+  return {lines, freq, sorted};
+}
+
+function findBranchStems(sorted, maxBranches=5) {
+  // Collect main "branch stems" by frequency, using first 2 words as group
+  const groups = {};
+  for (const [norm, obj] of sorted) {
+    const words = obj.orig.split(/\s+/);
+    if (words.length < 2) continue;
+    const stem = words.slice(0,2).join(" ").toLowerCase();
+    if (!groups[stem]) groups[stem] = {count:0, samples:[]};
+    groups[stem].count += obj.count;
+    if (groups[stem].samples.length < 3) groups[stem].samples.push(obj.orig);
+  }
+  // Also look for frequent one-word stems
+  for (const [norm, obj] of sorted) {
+    const words = obj.orig.split(/\s+/);
+    if (words.length === 1) {
+      const stem = words[0].toLowerCase();
+      if (!groups[stem]) groups[stem] = {count:0, samples:[]};
+      groups[stem].count += obj.count;
+      if (groups[stem].samples.length < 3) groups[stem].samples.push(obj.orig);
     }
   }
+  // Sort by count, prefer longer stems
+  const groupArr = Object.entries(groups)
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, maxBranches);
+  return groupArr.map(([stem, obj]) => ({stem, ...obj}));
+}
+
+function groupMindmapNodes(lyrics) {
+  const {lines, freq, sorted} = extractPhrases(lyrics);
+  const mainPhrase = sorted.length ? sorted[0][1].orig : (lines[0] || "Song");
+
+  // Find main branch stems
+  const branches = findBranchStems(sorted, 5);
+
+  // For each branch, gather children: lines starting with that stem, and next lines (if short)
+  function getChildren(stem) {
+    const children = [];
+    const lowStem = stem.toLowerCase();
+    for (let i=0; i<lines.length; ++i) {
+      const line = lines[i];
+      if (normalizeLine(line).startsWith(lowStem)) {
+        // Child is the remainder after stem
+        const rest = line.slice(stem.length).trim();
+        if (rest && isSignificant(rest)) {
+          children.push({label: rest});
+        }
+        // Try to add next line as child if it's short and not a branch
+        if (lines[i+1] && isSignificant(lines[i+1])) {
+          const nextNorm = normalizeLine(lines[i+1]);
+          if (!branches.some(b => nextNorm.startsWith(b.stem))) {
+            children.push({label: lines[i+1]});
+          }
+        }
+      }
+    }
+    // Remove duplicates
+    const seen = new Set();
+    return children.filter(child => {
+      const norm = normalizeLine(child.label);
+      if (seen.has(norm)) return false;
+      seen.add(norm);
+      return true;
+    }).slice(0, 4); // limit per branch
+  }
+
+  , "i");
+      if (re.test(normLine)) {
+        // Count how many times marker appears in the line
+        const count = (normLine.match(new RegExp(marker, "gi")) || []).length;
+        markerLines[marker] = (markerLines[marker] || 0) + 1;
+        markerMaxRepeats[marker] = Math.max(markerMaxRepeats[marker]||0, count);
+      }
+    });
+  });
+
+  // Find the most common repeated marker (for big node), but add all unique repeated markers as nodes
+  const sortedMarkers = Object.entries(markerLines)
+    .sort((a,b) => b[1] - a[1]);
+
   // Compose the mindmap structure
   const mindmap = {
     main: mainPhrase,
@@ -124,9 +236,17 @@ function groupMindmapNodes(lyrics) {
       children: getChildren(branch.stem)
     }))
   };
-  if (topVocal && topVocal.length > 2) {
-    mindmap.branches.push({label: topVocal, big:true});
+
+  // Add a big node for the most frequent marker, and normal nodes for others if present
+  if (sortedMarkers.length > 0) {
+    sortedMarkers.forEach(([marker], idx) => {
+      mindmap.branches.push({
+        label: marker,
+        big: idx === 0 // only the most frequent gets the big node
+      });
+    });
   }
+
   return mindmap;
 }
 
