@@ -1,4 +1,4 @@
-// Mindmap Generator: No duplicate child nodes, clean branching, draggable, fit text
+// Mindmap Generator: Clean recursive branching, grid-like layout, like the Hey Jude example
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -18,57 +18,9 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   return null;
 }
 
-function findRepeatedBlocks(lines, minBlockLen=2) {
-  const blocks = [];
-  const blockMap = {};
-  for (let blockLen = Math.max(minBlockLen, 2); blockLen <= 6; blockLen++) {
-    for (let i = 0; i <= lines.length - blockLen; i++) {
-      const block = lines.slice(i, i + blockLen).map(normalizeLine).join("\n");
-      if (!blockMap[block]) blockMap[block] = [i];
-      else blockMap[block].push(i);
-    }
-  }
-  Object.entries(blockMap).forEach(([block, indices]) => {
-    if (indices.length > 1) {
-      indices.forEach(idx => {
-        let overlaps = blocks.some(b =>
-          (idx >= b.start && idx < b.end) ||
-          (b.start >= idx && b.start < idx + block.split("\n").length)
-        );
-        if (!overlaps) {
-          blocks.push({
-            start: idx,
-            end: idx + block.split("\n").length,
-            length: block.split("\n").length,
-            textArr: block.split("\n"),
-            count: indices.length
-          });
-        }
-      });
-    }
-  });
-  blocks.sort((a, b) => a.start - b.start);
-  return blocks;
-}
-
-function detectStems(lines, minCount=2, minWords=2) {
-  const stemMap = {};
-  lines.forEach((line, idx) => {
-    const words = line.trim().split(/\s+/);
-    if (words.length >= minWords) {
-      const stem = words.slice(0, minWords).join(" ").toLowerCase();
-      if (!stemMap[stem]) stemMap[stem] = [];
-      stemMap[stem].push(idx);
-    }
-  });
-  return Object.entries(stemMap)
-    .filter(([stem, idxArr]) => idxArr.length >= minCount)
-    .map(([stem, idxArr]) => ({ stem, idxArr }));
-}
-
-function buildBranchingMindmapTree(lyrics) {
+function buildMindmapTree(lyrics) {
   const rawLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
-  if (rawLines.length === 0) return { main: "Song", branches: [] };
+  if (rawLines.length === 0) return { label: "Song", children: [] };
 
   // Discourse marker grouping
   const lines = [];
@@ -88,126 +40,78 @@ function buildBranchingMindmapTree(lyrics) {
     }
   }
 
-  const title = (lines[0].type === "lyric") ? lines[0].text : "Song";
-
-  // Find repeated blocks
-  const lyricLines = lines.map(l => l.type === "lyric" ? l.text : "");
-  const repeatedBlocks = findRepeatedBlocks(lyricLines, 2);
-
-  // Mark lines as part of a repeated block
-  const blockStarts = new Set();
-  const blockFirstOccurrence = {};
-  repeatedBlocks.forEach(block => {
-    blockStarts.add(block.start);
-    if (!blockFirstOccurrence[block.block]) {
-      blockFirstOccurrence[block.block] = block.start;
-    }
-  });
-
-  // Detect stems for partial repeats/branches (also keep word count)
-  const stems = [];
-  lyricLines.forEach((line, idx) => {
-    const words = line.trim().split(/\s+/);
-    for (let w = 3; w >= 2; w--) {
-      if (words.length >= w) {
-        const stem = words.slice(0, w).join(" ").toLowerCase();
-        let found = stems.find(s => s.stem === stem);
-        if (!found) stems.push({ stem, idxArr: [idx], words: w });
-        else found.idxArr.push(idx);
-        break;
-      }
-    }
-  });
-  // Filter: only stems with at least 2 lines, prefer longest possible
-  const stemGroups = stems.filter(s => s.idxArr.length >= 2)
-    .sort((a, b) => b.words - a.words); // prefer longer stems
-
-  // Track which lines are already grouped
-  const usedIdx = new Set();
-  const branches = [];
-
-  for (let i = 0; i < lines.length; ++i) {
-    if (usedIdx.has(i)) continue;
-    // Discourse marker node
-    if (lines[i].type === "discourse") {
-      branches.push({
-        label: lines[i].marker,
-        big: true,
-        count: lines[i].count
+  // Now: recursively group by stems (3, then 2 words) for horizontal branching,
+  // and avoid repeated child nodes.
+  function groupByStem(nodes, minCount = 2) {
+    if (nodes.length <= 1) return nodes.map(n => ({ ...n }));
+    // Try to group by 3-word, then 2-word stems
+    for (let stemLen = 3; stemLen >= 2; stemLen--) {
+      const stemGroups = {};
+      nodes.forEach((node, idx) => {
+        if (node.type === "lyric") {
+          const words = node.text.trim().split(/\s+/);
+          if (words.length >= stemLen) {
+            const stem = words.slice(0, stemLen).join(" ").toLowerCase();
+            if (!stemGroups[stem]) stemGroups[stem] = [];
+            stemGroups[stem].push(idx);
+          }
+        }
       });
-      usedIdx.add(i);
-      continue;
-    }
-
-    // Check for repeated block
-    let block = repeatedBlocks.find(b => b.start === i && blockFirstOccurrence[b.block] === i);
-    if (block) {
-      // Only show once
-      branches.push({
-        children: block.textArr.map((t, j) => ({
-          label: t
-        })),
-        repeat: block.count
-      });
-      for (let j = i; j < i + block.length; ++j) usedIdx.add(j);
-      continue;
-    }
-
-    // Skip other occurrences of repeated blocks
-    let isInOtherBlock = repeatedBlocks.some(b =>
-      b.start !== i &&
-      i >= b.start &&
-      i < b.end &&
-      blockFirstOccurrence[b.block] !== i
-    );
-    if (isInOtherBlock) {
-      usedIdx.add(i);
-      continue;
-    }
-
-    // Try to group as a stem (prefer longest match, and only if the lines are not already grouped)
-    let stemObj = stemGroups.find(stemObj =>
-      stemObj.idxArr.includes(i) &&
-      stemObj.idxArr.filter(idx => !usedIdx.has(idx)).length >= 2 &&
-      stemObj.idxArr[0] === i
-    );
-    if (stemObj) {
-      // Only keep unique suffixes (no duplicate child nodes)
-      const uniqueSuffixes = new Set();
-      const childNodes = [];
-      stemObj.idxArr
-        .filter(idx => !usedIdx.has(idx))
-        .forEach(idx => {
-          const line = (lines[idx].type === "lyric" ? lines[idx].text : "");
-          let suffix = line.trim().split(/\s+/).slice(stemObj.words).join(" ");
-          if (!suffix) suffix = "(...)";
-          const normSuffix = normalizeLine(suffix);
-          if (!uniqueSuffixes.has(normSuffix)) {
-            childNodes.push({ label: suffix });
-            uniqueSuffixes.add(normSuffix);
+      // Only keep stems with at least minCount lines, and not all lines (to avoid grouping everything)
+      const validStems = Object.entries(stemGroups)
+        .filter(([stem, idxArr]) => idxArr.length >= minCount && idxArr.length < nodes.length);
+      if (validStems.length > 0) {
+        // Group by these stems
+        const usedIdx = new Set();
+        const result = [];
+        validStems.forEach(([stem, idxArr]) => {
+          // Children: unique suffixes only
+          const seen = new Set();
+          const children = idxArr.map(idx => {
+            const node = nodes[idx];
+            const words = node.text.trim().split(/\s+/);
+            let suffix = words.slice(stemLen).join(" ");
+            if (!suffix) suffix = "(...)";
+            const normSuffix = normalizeLine(suffix);
+            if (seen.has(normSuffix)) return null;
+            seen.add(normSuffix);
+            // Allow further grouping within the suffixes
+            return { label: suffix, ...node, text: undefined, children: groupByStem([node], minCount) };
+          }).filter(Boolean);
+          result.push({ label: stem, children });
+          idxArr.forEach(idx => usedIdx.add(idx));
+        });
+        // Any unused nodes are added as is (possibly further grouped)
+        nodes.forEach((node, idx) => {
+          if (!usedIdx.has(idx)) {
+            if (node.type === "lyric") result.push({ label: node.text });
+            else if (node.type === "discourse")
+              result.push({ label: node.marker, big: true, count: node.count });
           }
         });
-      if (childNodes.length > 0) {
-        branches.push({
-          label: stemObj.stem,
-          children: childNodes
-        });
-        stemObj.idxArr.forEach(idx => usedIdx.add(idx));
-        continue;
+        return result;
       }
     }
-
-    // Otherwise, add as a single line
-    branches.push({
-      label: lines[i].text
+    // No valid stems, just return nodes as is (lyrics or discourse)
+    return nodes.map(node => {
+      if (node.type === "lyric") return { label: node.text };
+      if (node.type === "discourse") return { label: node.marker, big: true, count: node.count };
+      return node;
     });
-    usedIdx.add(i);
   }
 
-  return {
-    main: title,
-    branches: branches
-  };
+  // The first lyric is the root
+  let title = "Song";
+  for (const l of lines) {
+    if (l.type === "lyric") {
+      title = l.text;
+      break;
+    }
+  }
+  // Group the rest under the root, grouped by stem recursively
+  const children = groupByStem(lines);
+
+  return { label: title, children };
 }
 
 // Helper: fit text to box, shrink font if needed
@@ -230,94 +134,96 @@ function fitText(text, maxW, baseSize, minSize) {
   return { font: shrink, lines: [text] };
 }
 
-function renderMindmap(mindmap) {
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const rootW = 500, rootH = 72;
-  const branchBoxW = 260, branchBoxH = 54;
-  const childBoxW = 220, childBoxH = 40;
-  const vSpacing = 34, hSpacing = 32;
-  const rootXPad = 24;
+// Calculate subtree sizes and positions recursively
+function measureTree(node, opts) {
+  // Returns { width, height, node, children: [ ... ] }
+  // Each node is a box, children arranged horizontally
+  const boxW = node.big ? 140 : (opts.branchBoxW || 220);
+  const boxH = node.big ? 70 : (opts.branchBoxH || 46);
+  if (!node.children || node.children.length === 0) {
+    return { width: boxW, height: boxH, node, children: [] };
+  }
+  // Compute children sizes
+  const childRects = node.children.map(child => measureTree(child, opts));
+  // Arrange children horizontally
+  const childrenWidth =
+    childRects.reduce((a, b) => a + b.width, 0) +
+    opts.hSpacing * (childRects.length - 1);
+  const width = Math.max(boxW, childrenWidth);
+  const height =
+    boxH + opts.vSpacing + (childRects.length > 0 ? Math.max(...childRects.map(c => c.height)) : 0);
+  return {
+    width,
+    height,
+    node,
+    children: childRects,
+    childrenWidth,
+    boxW,
+    boxH
+  };
+}
 
-  let maxBranchChildren = 0;
-  mindmap.branches.forEach(branch => {
-    if (branch.children && branch.children.length) {
-      maxBranchChildren = Math.max(maxBranchChildren, branch.children.length);
-    }
-  });
-
-  let minSvgW = rootW + rootXPad * 2 + (childBoxW + hSpacing) * (maxBranchChildren > 0 ? 2 : 1) + 60;
-  let svgW = Math.max(minSvgW, 1100);
-  let svgH = 220 + (mindmap.branches.length * (branchBoxH + vSpacing)) + 110;
-
-  let elements = [];
-  let rootX = svgW / 2 - rootW / 2, rootY = 32;
-  elements.push(`<rect x="${rootX}" y="${rootY}" width="${rootW}" height="${rootH}" rx="12" fill="#fff" stroke="#222" stroke-width="2"/>`);
-  elements.push(`<text x="${rootX + rootW / 2}" y="${rootY + rootH / 2 + 20}" font-size="54" font-family="sans-serif" text-anchor="middle" font-weight="bold">${mindmap.main}</text>`);
-
-  let currentY = rootY + rootH + 56;
-  mindmap.branches.forEach((branch, bi) => {
-    let bx = rootX + rootXPad, by = currentY;
-    let bbW = branchBoxW;
-    let bbH = branchBoxH;
-    let fontSize = 26;
-    let fontWeight = "bold";
-
-    if (branch.big) {
-      bbW = 130;
-      fontSize = 48;
-    }
-
-    elements.push(`<rect x="${bx}" y="${by}" width="${bbW}" height="${bbH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
-
-    let branchLabel = branch.label || "";
-    if (branch.big && branch.count > 1) {
-      branchLabel += ` ×${branch.count}`;
-    }
-
-    let showLabel = (branch.label !== undefined);
-    if (showLabel) {
-      const fit = fitText(branchLabel, bbW - 20, fontSize, 15);
-      if (fit.lines.length === 1) {
-        elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[0]}</text>`);
-      } else {
-        elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 - 5}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[0]}</text>`);
-        elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[1]}</text>`);
-      }
-    }
-
-    if (branch.repeat && !branch.big) {
-      elements.push(`<text x="${bx + bbW - 20}" y="${by + bbH / 2 + 10}" font-size="21" font-family="sans-serif" text-anchor="end" fill="#888">×${branch.repeat}</text>`);
-    }
-
-    elements.push(`<path d="M${rootX + rootW / 2} ${rootY + rootH} L${bx + bbW / 2} ${by}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
-
-    if (branch.children && branch.children.length) {
-      let childrenTotalH = branch.children.length * (childBoxH + 7) - 7;
-      let startCy = by + bbH / 2 - childrenTotalH / 2;
-      branch.children.forEach((child, j) => {
-        let cx = bx + bbW + hSpacing, cy = startCy + j * (childBoxH + 7);
-        const fit = fitText(child.label, childBoxW - 16, 19, 11);
-        elements.push(`<rect x="${cx}" y="${cy}" width="${childBoxW}" height="${childBoxH}" rx="7" fill="#fff" stroke="#222" stroke-width="1.8"/>`);
-        if (fit.lines.length === 1) {
-          elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[0]}</text>`);
-        } else {
-          elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[0]}</text>`);
-          elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[1]}</text>`);
-        }
-        elements.push(`<path d="M${bx + bbW} ${by + bbH / 2} L${cx} ${cy + childBoxH / 2}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+// Render node and its children recursively
+function renderTree(x, y, rect, opts, elements, parentCenter = null) {
+  const { node, children, boxW, boxH } = rect;
+  // Center current node horizontally above/below its children
+  let nodeX = x + (rect.width - boxW) / 2;
+  let nodeY = y;
+  // Box and label
+  elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
+  let label = node.label || "";
+  if (node.big && node.count > 1) label += ` ×${node.count}`;
+  let fontSize = node.big ? 48 : 24;
+  const fit = fitText(label, boxW - 18, fontSize, 13);
+  if (fit.lines.length === 1) {
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+  } else {
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[1]}</text>`);
+  }
+  // Connect to parent
+  if (parentCenter) {
+    elements.push(`<path d="M${parentCenter.x} ${parentCenter.y} L${nodeX + boxW / 2} ${nodeY}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+  }
+  // Children
+  if (children && children.length > 0) {
+    let cx = x;
+    let cy = nodeY + boxH + opts.vSpacing;
+    children.forEach(childRect => {
+      // Center parent's bottom middle to child's top middle
+      renderTree(cx, cy, childRect, opts, elements, {
+        x: nodeX + boxW / 2,
+        y: nodeY + boxH
       });
-      currentY += Math.max(bbH, childrenTotalH) + vSpacing;
-    } else {
-      currentY += bbH + (branch.big ? 24 : vSpacing);
-    }
-  });
+      cx += childRect.width + opts.hSpacing;
+    });
+  }
+}
 
+function renderMindmap(mindmap) {
+  // Layout options
+  const opts = {
+    branchBoxW: 220, branchBoxH: 54,
+    hSpacing: 38, vSpacing: 32
+  };
+  // Measure recursively
+  const tree = measureTree(mindmap, opts);
+
+  // SVG size
+  let svgW = Math.max(tree.width + 80, 900);
+  let svgH = tree.height + 100;
+  let elements = [];
+  // SVG marker
+  const marker = `<defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L7,4 L2,6 L4,4 L2,2" style="fill: #222;" /></marker></defs>`;
+  // Render tree recursively
+  renderTree(40, 28, tree, opts, elements, null);
+  // Surrounding box
   elements.push(`<rect x="10" y="10" width="${svgW - 20}" height="${svgH - 20}" rx="22" fill="none" stroke="#222" stroke-width="3"/>`);
 
-  const marker = `<defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L7,4 L2,6 L4,4 L2,2" style="fill: #222;" /></marker></defs>`;
+  // Draggable SVG in a scrollable wrapper
   return `
   <div id="mindmapSvgWrapper" style="width:100%;height:700px;overflow:auto;cursor:grab;">
-  <svg id="mindmapSvg" width="${svgW}" height="${svgH}" xmlns="${svgNS}" style="background:#efefef;user-select:none">${marker}${elements.join('\n')}</svg>
+  <svg id="mindmapSvg" width="${svgW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg" style="background:#efefef;user-select:none">${marker}${elements.join('\n')}</svg>
   </div>`;
 }
 
@@ -327,10 +233,11 @@ function generateMindmap() {
     document.getElementById('mindmapArea').innerHTML = '<p style="color:#c00">Please paste some lyrics first.</p>';
     return;
   }
-  const mindmap = buildBranchingMindmapTree(lyrics);
+  const mindmap = buildMindmapTree(lyrics);
   const svg = renderMindmap(mindmap);
   document.getElementById('mindmapArea').innerHTML = svg;
 
+  // Add drag-to-pan logic
   setTimeout(() => {
     const wrapper = document.getElementById("mindmapSvgWrapper");
     const svgEl = document.getElementById("mindmapSvg");
