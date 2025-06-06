@@ -1,4 +1,4 @@
-// Mindmap Generator: Hybrid grid/branching with banding and robust child node logic
+// Mindmap Generator: Hybrid (vertical + banded horizontal) layout, clean, complete
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -41,13 +41,10 @@ function buildMindmapTree(lyrics) {
     }
   }
 
-  // Recursively group by stems, and always emit a label for each node
   function groupByStem(nodes, minCount = 2, stemWindow = [3,2]) {
     if (nodes.length <= 1) return nodes.map(n => ({ ...n }));
 
-    // Try to group by stems
     for (let stemLen of stemWindow) {
-      // Find stems
       const stemGroups = {};
       nodes.forEach((node, idx) => {
         if (node.type === "lyric") {
@@ -59,14 +56,12 @@ function buildMindmapTree(lyrics) {
           }
         }
       });
-      // Only keep stems with at least minCount lines and not all lines
       const validStems = Object.entries(stemGroups)
         .filter(([stem, idxArr]) => idxArr.length >= minCount && idxArr.length < nodes.length);
       if (validStems.length > 0) {
         const usedIdx = new Set();
         const result = [];
         validStems.forEach(([stem, idxArr]) => {
-          // Deduplicate suffixes and skip blank/empty suffixes
           const seen = new Set();
           const children = [];
           idxArr.forEach(idx => {
@@ -76,34 +71,16 @@ function buildMindmapTree(lyrics) {
             if (!suffix) suffix = "(...)";
             const normSuffix = normalizeLine(suffix);
             if (!seen.has(normSuffix)) {
-              // Recursively group suffixes as new nodes (if possible)
               let childNode = { label: suffix };
               if (node.children) childNode.children = node.children;
               children.push(childNode);
               seen.add(normSuffix);
             }
           });
-          // Banding: arrange children vertically in bands, each of height ~sqrt(count)
-          let bandHeight = Math.ceil(Math.sqrt(children.length));
-          let bands = [];
-          for (let i = 0; i < children.length; i += bandHeight) {
-            bands.push(children.slice(i, i + bandHeight));
-          }
-          // Each band's children should be stacked vertically, but the bands (if more than one) are laid out horizontally
-          let bandNodes = bands.map(bandArr => ({
-            label: null,
-            isBand: true,
-            children: bandArr
-          }));
-          // If only one band, flatten:
-          if (bandNodes.length === 1) {
-            result.push({ label: stem, children: bands[0] });
-          } else {
-            result.push({ label: stem, children: bandNodes });
-          }
+          // No banding here -- leave as children, let banding be handled at rendering
+          result.push({ label: stem, children });
           idxArr.forEach(idx => usedIdx.add(idx));
         });
-        // Add unused nodes as vertical nodes under this group
         nodes.forEach((node, idx) => {
           if (!usedIdx.has(idx)) {
             if (node.type === "lyric" || node.type === "discourse") result.push({ ...node });
@@ -112,29 +89,21 @@ function buildMindmapTree(lyrics) {
         return result;
       }
     }
-    // No valid stems, just return nodes (each with label)
     return nodes.map(node => ({ ...node }));
   }
 
-  // Hybrid tree builder: each vertical level is a "band", children are laid out horizontally, then rejoined in the next band
   function buildHybridTree(nodes) {
     if (!nodes || nodes.length === 0) return [];
-    // Group by stems at this level
     const grouped = groupByStem(nodes);
-    // For each group, recursively process children
     return grouped.map(groupNode => {
       let node = { ...groupNode };
-      // If isBand, just process band children vertically
-      if (node.isBand && node.children) {
-        node.children = node.children.map(child => buildHybridTree([child])[0]);
-      } else if (node.children) {
+      if (node.children) {
         node.children = buildHybridTree(node.children);
       }
       return node;
     });
   }
 
-  // The first lyric is the root
   let title = "Song";
   for (const l of lines) {
     if (l.type === "lyric") {
@@ -142,7 +111,6 @@ function buildMindmapTree(lyrics) {
       break;
     }
   }
-  // Build the hybrid tree for the rest
   const children = buildHybridTree(lines);
 
   return { label: title, children };
@@ -169,88 +137,88 @@ function fitText(text, maxW, baseSize, minSize) {
   return { font: shrink, lines: [text] };
 }
 
-// Recursive layout: vertical bands, but child nodes in a band horizontally
+// --- Hybrid Layout: vertical progression, horizontal bands for children ---
+
+function bandChildren(children) {
+  // Given children array, split into bands of sqrt(children.length) height, bands are horizontal blocks
+  if (!children || children.length === 0) return [];
+  const bandHeight = Math.ceil(Math.sqrt(children.length));
+  const bands = [];
+  for (let i = 0; i < children.length; i += bandHeight) {
+    bands.push(children.slice(i, i + bandHeight));
+  }
+  return bands;
+}
+
 function measureTree(node, opts) {
-  // Returns { width, height, node, children: [ ... ] }
   const boxW = node.big ? 140 : (opts.branchBoxW || 220);
   const boxH = node.big ? 70 : (opts.branchBoxH || 46);
-
-  // If isBand, children are stacked vertically, else children are horizontal band
-  if (node.isBand && node.children && node.children.length) {
-    // Stack all band children vertically
-    let widths = [];
-    let height = 0;
-    let childrenRects = node.children.map(child => {
-      let rect = measureTree(child, opts);
-      widths.push(rect.width);
-      height += rect.height + opts.vSpacing;
-      return rect;
-    });
-    height -= opts.vSpacing; // no vspacing after last
-    let width = Math.max(...widths, boxW);
-    return { width, height, node, children: childrenRects, boxW, boxH, isBand: true };
-  }
   if (!node.children || node.children.length === 0) {
     return { width: boxW, height: boxH, node, children: [], boxW, boxH };
   }
-  // Children: arrange horizontally (band)
-  let childrenRects = node.children.map(child => measureTree(child, opts));
-  const hSpacing = opts.hSpacing;
-  const totalChildrenWidth =
-    childrenRects.reduce((a, b) => a + b.width, 0) +
-    hSpacing * (childrenRects.length - 1);
-  const width = Math.max(boxW, totalChildrenWidth);
-  const height = boxH + (childrenRects.length > 0 ? opts.vSpacing + Math.max(...childrenRects.map(c => c.height)) : 0);
+  // Band children
+  const bands = bandChildren(node.children);
+  let width = boxW;
+  let height = boxH;
+  const bandRects = [];
+  let maxBandW = 0;
+  bands.forEach(bandArr => {
+    // This band: vertical stack of nodes
+    let bandChildrenRects = bandArr.map(child => measureTree(child, opts));
+    let bandW = Math.max(...bandChildrenRects.map(r => r.width));
+    let bandH = bandChildrenRects.reduce((a, r) => a + r.height, 0) + (bandChildrenRects.length - 1) * opts.vSpacing;
+    bandRects.push({
+      children: bandChildrenRects,
+      width: bandW,
+      height: bandH,
+    });
+    maxBandW += bandW;
+  });
+  // Bands are arranged horizontally, each band's width is bandW, height is max in column
+  let bandsSpacingW = (bands.length - 1) * opts.hSpacing;
+  width = Math.max(boxW, bandRects.reduce((a, b) => a + b.width, 0) + bandsSpacingW);
+  height = boxH + (bandRects.length > 0 ? opts.vSpacing + Math.max(...bandRects.map(b => b.height)) : 0);
   return {
-    width, height, node, children: childrenRects, boxW, boxH, isBand: false
+    width, height, node, bands: bandRects, boxW, boxH
   };
 }
 
-// Render tree: hybrid vertical/horizontal bands, no blank nodes
 function renderTree(x, y, rect, opts, elements, parentCenter = null) {
-  const { node, children, boxW, boxH, isBand } = rect;
-  // Center current node horizontally above its children (or align for band)
+  const { node, bands, boxW, boxH } = rect;
   let nodeX = x + (rect.width - boxW) / 2;
   let nodeY = y;
-  // Draw box and label (skip for isBand)
-  if (!isBand) {
-    elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
-    let label = node.label || "";
-    if (node.big && node.count > 1) label += ` ×${node.count}`;
-    let fontSize = node.big ? 48 : 24;
-    const fit = fitText(label, boxW - 18, fontSize, 13);
-    if (fit.lines.length === 1) {
-      elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
-    } else {
-      elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
-      elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[1]}</text>`);
-    }
-    // Connect to parent
-    if (parentCenter) {
-      elements.push(`<path d="M${parentCenter.x} ${parentCenter.y} L${nodeX + boxW / 2} ${nodeY}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
-    }
+  // Draw box and label
+  elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
+  let label = node.label || "";
+  if (node.big && node.count > 1) label += ` ×${node.count}`;
+  let fontSize = node.big ? 48 : 24;
+  const fit = fitText(label, boxW - 18, fontSize, 13);
+  if (fit.lines.length === 1) {
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+  } else {
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[1]}</text>`);
   }
-  // Children
-  if (children && children.length > 0) {
-    if (isBand) {
-      // Stack children vertically (band)
-      let cy = nodeY;
-      children.forEach(childRect => {
-        renderTree(x, cy, childRect, opts, elements, parentCenter);
-        cy += childRect.height + opts.vSpacing;
-      });
-    } else {
-      // Layout children horizontally (band)
-      let cx = x;
-      let cy = nodeY + boxH + opts.vSpacing;
-      children.forEach(childRect => {
-        renderTree(cx, cy, childRect, opts, elements, {
+  // Connect to parent
+  if (parentCenter) {
+    elements.push(`<path d="M${parentCenter.x} ${parentCenter.y} L${nodeX + boxW / 2} ${nodeY}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+  }
+  // Render bands
+  if (bands && bands.length > 0) {
+    let totalBandsW = bands.reduce((a, b) => a + b.width, 0) + (bands.length - 1) * opts.hSpacing;
+    let cx = x + (rect.width - totalBandsW) / 2;
+    let cy = nodeY + boxH + opts.vSpacing;
+    bands.forEach(band => {
+      let bandY = cy;
+      band.children.forEach(childRect => {
+        renderTree(cx, bandY, childRect, opts, elements, {
           x: nodeX + boxW / 2,
           y: nodeY + boxH
         });
-        cx += childRect.width + opts.hSpacing;
+        bandY += childRect.height + opts.vSpacing;
       });
-    }
+      cx += band.width + opts.hSpacing;
+    });
   }
 }
 
