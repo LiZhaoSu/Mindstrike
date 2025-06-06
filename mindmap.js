@@ -1,4 +1,4 @@
-// Mindmap Generator: Hybrid paragraph-style, vertical flow, child nodes horizontal with wrapping, arrows remain
+// Mindmap Generator: Maximal merging (deepest trees), vertical flow, horizontal split, arrows remain
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -18,12 +18,79 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   return null;
 }
 
+// Find maximal common prefix (as array of words) for a group of lines
+function maximalCommonPrefix(lines) {
+  if (!lines.length) return [];
+  const splitLines = lines.map(l => l.trim().split(/\s+/));
+  const minLen = Math.min(...splitLines.map(arr => arr.length));
+  let prefix = [];
+  for (let i = 0; i < minLen; ++i) {
+    const word = splitLines[0][i];
+    if (splitLines.every(arr => arr[i] === word)) {
+      prefix.push(word);
+    } else {
+      break;
+    }
+  }
+  return prefix;
+}
+
+// Recursively merge lines into tree by maximal common prefix
+function mergeLinesToTree(nodes) {
+  if (nodes.length === 0) return [];
+  // If all are discourse nodes, return as is
+  if (nodes.every(n => n.type === "discourse")) {
+    return nodes.map(n => ({ ...n }));
+  }
+  // Filter out discourse nodes, process lyrics
+  const lyrics = nodes.filter(n => n.type !== "discourse");
+  const discourse = nodes.filter(n => n.type === "discourse");
+  if (lyrics.length === 0) return discourse.map(n => ({ ...n }));
+
+  // Get labels
+  const lines = lyrics.map(n => n.label);
+
+  // Find maximal common prefix
+  const mcp = maximalCommonPrefix(lines);
+
+  if (mcp.length === 0) {
+    // No merge possible, return each as a vertical node
+    return [
+      ...lyrics.map(n => ({ label: n.label })),
+      ...discourse.map(n => ({ ...n }))
+    ];
+  }
+
+  // Group by next word after prefix
+  const groups = {};
+  lyrics.forEach(n => {
+    const words = n.label.trim().split(/\s+/);
+    const suffixArr = words.slice(mcp.length);
+    const key = suffixArr.length === 0 ? "…" : suffixArr[0];
+    if (!groups[key]) groups[key] = [];
+    groups[key].push({
+      ...n,
+      label: suffixArr.join(" ") || "(...)"
+    });
+  });
+
+  // Compose node for the prefix, with children as branches
+  const children = Object.values(groups).map(groupArr => mergeLinesToTree(groupArr)[0]);
+  // Place discourse nodes as their own children at the end (to maintain order)
+  discourse.forEach(dn => children.push({ ...dn }));
+
+  return [{
+    label: mcp.join(" "),
+    children
+  }];
+}
+
 function buildMindmapTree(lyrics) {
   const rawLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
   if (rawLines.length === 0) return { label: "Song", children: [] };
 
-  // Discourse marker grouping
-  const lines = [];
+  // Group lines into lyric/discourse nodes
+  const nodes = [];
   for (let i = 0; i < rawLines.length; ++i) {
     const dm = isDiscourseMarkerLine(rawLines[i]);
     if (dm) {
@@ -33,85 +100,29 @@ function buildMindmapTree(lyrics) {
         count += isDiscourseMarkerLine(rawLines[j], [dm.marker]).count;
         j++;
       }
-      lines.push({ type: "discourse", label: dm.marker, big: true, count, idx: i });
+      nodes.push({ type: "discourse", label: dm.marker, big: true, count, idx: i });
       i = j - 1;
     } else {
-      lines.push({ type: "lyric", label: rawLines[i], idx: i });
+      nodes.push({ type: "lyric", label: rawLines[i], idx: i });
     }
   }
 
-  function groupByStem(nodes, minCount = 2, stemWindow = [3,2]) {
-    if (nodes.length <= 1) return nodes.map(n => ({ ...n }));
+  // Build maximal merge tree
+  const tree = mergeLinesToTree(nodes);
 
-    for (let stemLen of stemWindow) {
-      const stemGroups = {};
-      nodes.forEach((node, idx) => {
-        if (node.type === "lyric") {
-          const words = node.label.trim().split(/\s+/);
-          if (words.length >= stemLen) {
-            const stem = words.slice(0, stemLen).join(" ").toLowerCase();
-            if (!stemGroups[stem]) stemGroups[stem] = [];
-            stemGroups[stem].push(idx);
-          }
-        }
-      });
-      const validStems = Object.entries(stemGroups)
-        .filter(([stem, idxArr]) => idxArr.length >= minCount && idxArr.length < nodes.length);
-      if (validStems.length > 0) {
-        const usedIdx = new Set();
-        const result = [];
-        validStems.forEach(([stem, idxArr]) => {
-          const seen = new Set();
-          const children = [];
-          idxArr.forEach(idx => {
-            const node = nodes[idx];
-            const words = node.label.trim().split(/\s+/);
-            let suffix = words.slice(stemLen).join(" ");
-            if (!suffix) suffix = "(...)";
-            const normSuffix = normalizeLine(suffix);
-            if (!seen.has(normSuffix)) {
-              let childNode = { label: suffix };
-              if (node.children) childNode.children = node.children;
-              children.push(childNode);
-              seen.add(normSuffix);
-            }
-          });
-          result.push({ label: stem, children });
-          idxArr.forEach(idx => usedIdx.add(idx));
-        });
-        nodes.forEach((node, idx) => {
-          if (!usedIdx.has(idx)) {
-            if (node.type === "lyric" || node.type === "discourse") result.push({ ...node });
-          }
-        });
-        return result;
-      }
-    }
-    return nodes.map(node => ({ ...node }));
-  }
-
-  function buildHybridTree(nodes) {
-    if (!nodes || nodes.length === 0) return [];
-    const grouped = groupByStem(nodes);
-    return grouped.map(groupNode => {
-      let node = { ...groupNode };
-      if (node.children) {
-        node.children = buildHybridTree(node.children);
-      }
-      return node;
-    });
-  }
-
+  // Use first lyric as root if possible
   let title = "Song";
-  for (const l of lines) {
-    if (l.type === "lyric") {
-      title = l.label;
+  for (const n of nodes) {
+    if (n.type === "lyric") {
+      title = n.label;
       break;
     }
   }
-  const children = buildHybridTree(lines);
-
-  return { label: title, children };
+  // If the root node is the same as title, extract its children and use as root's children
+  if (tree.length === 1 && tree[0].label === title && tree[0].children) {
+    return { label: title, children: tree[0].children };
+  }
+  return { label: title, children: tree };
 }
 
 // Helper: fit text to box, shrink font if needed
@@ -138,7 +149,6 @@ function fitText(text, maxW, baseSize, minSize) {
 // --- Hybrid Layout: vertical main flow, horizontal children with wrapping ---
 
 function wrapChildren(children, maxPerRow = 4) {
-  // Split children into rows of maxPerRow
   if (!children || children.length === 0) return [];
   const rows = [];
   for (let i = 0; i < children.length; i += maxPerRow) {
@@ -153,13 +163,11 @@ function measureTree(node, opts) {
   if (!node.children || node.children.length === 0) {
     return { width: boxW, height: boxH, node, childrenRows: [], boxW, boxH };
   }
-  // Arrange children in rows, wrapping as needed
-  const maxPerRow = 4; // or calculate by width
+  const maxPerRow = 4;
   const rows = wrapChildren(node.children, maxPerRow);
   const childrenRows = rows.map(row =>
     row.map(child => measureTree(child, opts))
   );
-  // Each row: horizontal, stacked vertically
   const rowWidths = childrenRows.map(rowRects =>
     rowRects.reduce((a, b) => a + b.width, 0) + (rowRects.length - 1) * opts.hSpacing
   );
@@ -216,7 +224,6 @@ function renderTree(x, y, rect, opts, elements, parentCenter = null) {
 }
 
 function renderMindmap(mindmap) {
-  // Layout options
   const opts = {
     branchBoxW: 220, branchBoxH: 54,
     hSpacing: 38, vSpacing: 32
