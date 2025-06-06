@@ -1,4 +1,4 @@
-// Mindmap Generator: Always Sings the Whole Song
+// Mindmap Generator: Lyrics Branching for Repeats and Parallel Verses
 
 function normalizeLine(line) {
   // Remove punctuation, trim and lowercase
@@ -20,86 +20,186 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   return null;
 }
 
-// Parse lyrics into a sequence of nodes, grouping discourse marker blocks, and marking repeated lines (optional)
-function parseLyricsToNodes(lyrics) {
-  const lines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
-  const nodes = [];
-  const seenLines = {}; // for repeated line detection
-  let lastDiscourse = null;
+// Detect repeated blocks in lyrics (returns array of block {start, end, length, textArr})
+function findRepeatedBlocks(lines, minBlockLen=2) {
+  // Find repeated blocks (naive approach, but enough for song lyrics)
+  const blocks = [];
+  const seenBlocks = {};
+  for (let blockLen = Math.max(minBlockLen, 2); blockLen <= 6; blockLen++) {
+    for (let i = 0; i <= lines.length - blockLen; i++) {
+      const block = lines.slice(i, i + blockLen).map(normalizeLine).join("\n");
+      if (!seenBlocks[block]) {
+        seenBlocks[block] = [i];
+      } else {
+        seenBlocks[block].push(i);
+      }
+    }
+  }
+  // Collect blocks that repeat (appear in 2+ different positions, not overlapping)
+  Object.entries(seenBlocks).forEach(([block, indices]) => {
+    if (indices.length > 1) {
+      // Avoid overlapping blocks and duplicates
+      indices.forEach(idx => {
+        // Check if block already overlaps with one in blocks[]
+        let overlaps = blocks.some(b => {
+          return (
+            (idx >= b.start && idx < b.end) ||
+            (b.start >= idx && b.start < idx + block.split("\n").length)
+          );
+        });
+        if (!overlaps) {
+          blocks.push({
+            start: idx,
+            end: idx + block.split("\n").length,
+            length: block.split("\n").length,
+            textArr: block.split("\n"),
+            block
+          });
+        }
+      });
+    }
+  });
+  // Sort by start index
+  blocks.sort((a, b) => a.start - b.start);
+  return blocks;
+}
 
-  for (let i = 0; i < lines.length; ++i) {
-    const line = lines[i];
-    const dm = isDiscourseMarkerLine(line);
+// Detect stems (common line beginnings) for partial repeat branches
+function detectStems(lines, minCount=2, minWords=2) {
+  const stemMap = {};
+  lines.forEach((line, idx) => {
+    const words = line.trim().split(/\s+/);
+    if (words.length >= minWords) {
+      const stem = words.slice(0, minWords).join(" ").toLowerCase();
+      if (!stemMap[stem]) stemMap[stem] = [];
+      stemMap[stem].push(idx);
+    }
+  });
+  // Only keep stems with at least minCount lines
+  return Object.entries(stemMap)
+    .filter(([stem, idxArr]) => idxArr.length >= minCount)
+    .map(([stem, idxArr]) => ({ stem, idxArr }));
+}
+
+// Build a tree structure for the mindmap: root is title, branches for repeated/parallel parts
+function buildBranchingMindmapTree(lyrics) {
+  const rawLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
+  if (rawLines.length === 0) return { main: "Song", branches: [] };
+  
+  // Find and group discourse marker lines
+  const lines = [];
+  for (let i = 0; i < rawLines.length; ++i) {
+    const dm = isDiscourseMarkerLine(rawLines[i]);
     if (dm) {
-      // Group consecutive discourse marker lines into one node, count total
+      // Group consecutive same marker lines
       let count = dm.count;
       let j = i + 1;
-      while (j < lines.length && isDiscourseMarkerLine(lines[j], [dm.marker])) {
-        count += isDiscourseMarkerLine(lines[j], [dm.marker]).count;
+      while (j < rawLines.length && isDiscourseMarkerLine(rawLines[j], [dm.marker])) {
+        count += isDiscourseMarkerLine(rawLines[j], [dm.marker]).count;
         j++;
       }
-      nodes.push({
-        type: "discourse",
-        marker: dm.marker,
-        count: count
-      });
+      lines.push({ type: "discourse", marker: dm.marker, count, idx: i });
       i = j - 1;
-      lastDiscourse = dm.marker;
+    } else {
+      lines.push({ type: "lyric", text: rawLines[i], idx: i });
+    }
+  }
+
+  // Use the first line as title if it's not a discourse marker
+  const title = (lines[0].type === "lyric") ? lines[0].text : "Song";
+
+  // Find repeated blocks (for chorus/verse detection)
+  const lyricLines = lines.map(l => l.type === "lyric" ? l.text : "");
+  const repeatedBlocks = findRepeatedBlocks(lyricLines, 2);
+
+  // Mark lines as part of a repeated block (chorus/verse)
+  const blockMap = {};
+  repeatedBlocks.forEach(block => {
+    for (let i = block.start; i < block.end; i++) {
+      if (!blockMap[i]) blockMap[i] = [];
+      blockMap[i].push(block);
+    }
+  });
+
+  // Detect stems (e.g., "Hey Jude, don't ...") for partial repeats
+  const stems = detectStems(lyricLines, 2, 3); // 3-word stems for more specificity
+
+  // Build branches: group lines by repeated block, stem, or as sequentials
+  const branches = [];
+  const usedIdx = new Set();
+
+  for (let i = 0; i < lines.length; ++i) {
+    if (usedIdx.has(i)) continue;
+
+    // Discourse marker node
+    if (lines[i].type === "discourse") {
+      branches.push({
+        label: lines[i].marker,
+        big: true,
+        count: lines[i].count
+      });
+      usedIdx.add(i);
       continue;
     }
 
-    // Optionally, detect repeated lines (could be rendered as references)
-    const norm = normalizeLine(line);
-    let isRepeat = false;
-    if (seenLines[norm]) {
-      isRepeat = true;
-      seenLines[norm].push(nodes.length);
-    } else {
-      seenLines[norm] = [nodes.length];
+    // Try to group as a repeated block
+    let block = null;
+    if (blockMap[i]) {
+      // Pick the longest block starting here
+      block = blockMap[i].reduce((a, b) => (a.length > b.length ? a : b));
+    }
+    if (block && block.start === i) {
+      branches.push({
+        label: "Repeated section",
+        children: block.textArr.map((t, j) => ({
+          label: t
+        })),
+        repeated: true
+      });
+      // Mark all lines in this block as used
+      for (let j = i; j < i + block.length; ++j) usedIdx.add(j);
+      continue;
     }
 
-    nodes.push({
-      type: "lyric",
-      text: line,
-      repeat: isRepeat,
-      origIndex: i
-    });
-    lastDiscourse = null;
-  }
-  return nodes;
-}
+    // Try to group as a stem (parallel structure)
+    const stemEntry = stems.find(stemObj => stemObj.idxArr.includes(i));
+    if (stemEntry && stemEntry.idxArr[0] === i) {
+      // Group all lines starting with same stem as a branch
+      branches.push({
+        label: lines[i].text.split(/\s+/).slice(0, 3).join(" "),
+        children: stemEntry.idxArr.map(idx => ({
+          label: lines[idx].text
+        }))
+      });
+      stemEntry.idxArr.forEach(idx => usedIdx.add(idx));
+      continue;
+    }
 
-// Build a linear mindmap tree from parsed nodes
-function buildMindmapTree(lyrics) {
-  const nodes = parseLyricsToNodes(lyrics);
-  // The tree is a top-level "Song Title" node, with children as the sequence of lyric/discourse nodes
-  // If the first line is not a "title", use the first line as the title, otherwise take first non-empty line
-  let title = "";
-  const allLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l);
-  if (allLines.length > 0 && allLines[0].length > 0) {
-    title = allLines[0];
-  } else {
-    title = "Song";
+    // Otherwise, add as a single line
+    branches.push({
+      label: lines[i].text
+    });
+    usedIdx.add(i);
   }
+
   return {
     main: title,
-    sequence: nodes
+    branches: branches
   };
 }
 
-// SVG Renderer for linear lyrics mindmap
+// SVG Renderer for branching lyrics mindmap
 function renderMindmap(mindmap) {
-  // Layout: vertical tree, root at top, each line/discourse node in order
+  // Layout: vertical tree, root at top, branches arranged vertically
   const svgNS = 'http://www.w3.org/2000/svg';
   const rootW = 500, rootH = 72;
-  const nodeW = 370, nodeH = 48;
-  const nodePadY = 26;
-  const nodeFont = 22;
-  const discourseFont = 44;
-  const repeatFont = 18;
+  const branchBoxW = 220, branchBoxH = 54;
+  const childBoxW = 200, childBoxH = 40;
+  const vSpacing = 34, hSpacing = 28;
+  const rootXPad = 24;
 
-  let svgW = 950;
-  let svgH = rootH + mindmap.sequence.length * (nodeH + nodePadY) + 100;
+  let svgW = 1100;
+  let svgH = 220 + (mindmap.branches.length * (branchBoxH + vSpacing)) + 110;
 
   let elements = [];
   // Root node
@@ -107,46 +207,47 @@ function renderMindmap(mindmap) {
   elements.push(`<rect x="${rootX}" y="${rootY}" width="${rootW}" height="${rootH}" rx="12" fill="#fff" stroke="#222" stroke-width="2"/>`);
   elements.push(`<text x="${rootX + rootW / 2}" y="${rootY + rootH / 2 + 20}" font-size="54" font-family="sans-serif" text-anchor="middle" font-weight="bold">${mindmap.main}</text>`);
 
-  // Sequential nodes
-  let prevX = rootX + rootW / 2, prevY = rootY + rootH;
-  let nodeX = rootX + 50;
-  let nodeStartY = rootY + rootH + 18;
-  mindmap.sequence.forEach((node, idx) => {
-    let y = nodeStartY + idx * (nodeH + nodePadY);
-    let label = "";
-    let fontSize = nodeFont;
-    let boxW = nodeW;
-    let fontWeight = "normal";
-    let extra = "";
+  // Branches
+  let currentY = rootY + rootH + 56;
+  mindmap.branches.forEach((branch, bi) => {
+    let bx = rootX + rootXPad, by = currentY;
+    let bbW = branchBoxW;
+    let bbH = branchBoxH;
+    let fontSize = 28;
+    let fontWeight = "bold";
 
-    if (node.type === "discourse") {
-      label = node.marker;
-      fontSize = discourseFont;
+    if (branch.big) {
+      bbW = 130;
+      fontSize = 48;
       fontWeight = "bold";
-      boxW = 130;
-      if (node.count > 1)
-        extra = `<text x="${nodeX + boxW / 2}" y="${y + nodeH / 2 + 28}" font-size="${repeatFont}" font-family="sans-serif" text-anchor="middle" fill="#444">×${node.count}</text>`;
-    } else if (node.type === "lyric") {
-      label = node.text;
-      if (node.repeat)
-        extra = `<text x="${nodeX + boxW - 20}" y="${y + nodeH / 2 + 10}" font-size="${repeatFont}" font-family="sans-serif" text-anchor="end" fill="#888">↺</text>`;
     }
 
-    // Node box
-    elements.push(`<rect x="${nodeX}" y="${y}" width="${boxW}" height="${nodeH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
-    // Text
-    elements.push(`<text x="${nodeX + boxW / 2}" y="${y + nodeH / 2 + fontSize / 3 - 4}" font-size="${fontSize}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${label}</text>`);
-    // Extra (repeat or count)
-    if (extra) elements.push(extra);
+    // Branch box
+    elements.push(`<rect x="${bx}" y="${by}" width="${bbW}" height="${bbH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
+    // Branch label
+    let branchLabel = branch.label;
+    if (branch.big && branch.count > 1) {
+      branchLabel += ` ×${branch.count}`;
+    }
+    elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fontSize / 3 - 4}" font-size="${fontSize}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${branchLabel}</text>`);
+    // Connector from root to branch
+    elements.push(`<path d="M${rootX + rootW / 2} ${rootY + rootH} L${bx + bbW / 2} ${by}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
 
-    // Connector from previous node
-    if (idx === 0) {
-      // From root to first node
-      elements.push(`<path d="M${prevX} ${prevY} L${nodeX + boxW / 2} ${y}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+    // Children (horizontal, rightwards)
+    if (branch.children && branch.children.length) {
+      let childrenTotalH = branch.children.length * (childBoxH + 7) - 7;
+      let startCy = by + bbH / 2 - childrenTotalH / 2;
+      branch.children.forEach((child, j) => {
+        let cx = bx + bbW + hSpacing, cy = startCy + j * (childBoxH + 7);
+        const cb = `<rect x="${cx}" y="${cy}" width="${childBoxW}" height="${childBoxH}" rx="7" fill="#fff" stroke="#222" stroke-width="1.8"/>`;
+        const ct = `<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + 8}" font-size="19" font-family="sans-serif" text-anchor="middle">${child.label}</text>`;
+        elements.push(cb, ct);
+        // Connector from branch to child
+        elements.push(`<path d="M${bx + bbW} ${by + bbH / 2} L${cx} ${cy + childBoxH / 2}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+      });
+      currentY += Math.max(bbH, childrenTotalH) + vSpacing;
     } else {
-      // From previous node to this node
-      let prevYBox = nodeStartY + (idx - 1) * (nodeH + nodePadY) + nodeH;
-      elements.push(`<path d="M${nodeX + boxW / 2} ${prevYBox} L${nodeX + boxW / 2} ${y}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+      currentY += bbH + (branch.big ? 24 : vSpacing);
     }
   });
 
@@ -165,7 +266,7 @@ function generateMindmap() {
     document.getElementById('mindmapArea').innerHTML = '<p style="color:#c00">Please paste some lyrics first.</p>';
     return;
   }
-  const mindmap = buildMindmapTree(lyrics);
+  const mindmap = buildBranchingMindmapTree(lyrics);
   const svg = renderMindmap(mindmap);
   document.getElementById('mindmapArea').innerHTML = svg;
 }
