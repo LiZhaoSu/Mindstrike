@@ -1,4 +1,4 @@
-// Mindmap Generator: Hybrid, easy-to-follow arrows, vertical main flow
+// Mindmap Generator: Hybrid paragraph-style, vertical flow, child nodes horizontal with wrapping, arrows remain
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -17,8 +17,6 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   }
   return null;
 }
-
-// --- Mindmap tree building as before ---
 
 function buildMindmapTree(lyrics) {
   const rawLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
@@ -78,7 +76,7 @@ function buildMindmapTree(lyrics) {
               seen.add(normSuffix);
             }
           });
-          result.push({ label: stem, band: children });
+          result.push({ label: stem, children });
           idxArr.forEach(idx => usedIdx.add(idx));
         });
         nodes.forEach((node, idx) => {
@@ -97,9 +95,6 @@ function buildMindmapTree(lyrics) {
     const grouped = groupByStem(nodes);
     return grouped.map(groupNode => {
       let node = { ...groupNode };
-      if (node.band) {
-        node.band = buildHybridTree(node.band);
-      }
       if (node.children) {
         node.children = buildHybridTree(node.children);
       }
@@ -119,8 +114,7 @@ function buildMindmapTree(lyrics) {
   return { label: title, children };
 }
 
-// --- Text fit helper ---
-
+// Helper: fit text to box, shrink font if needed
 function fitText(text, maxW, baseSize, minSize) {
   if (!text) return { font: baseSize, lines: [""] };
   const estW = text.length * baseSize * 0.62 + 18;
@@ -141,114 +135,82 @@ function fitText(text, maxW, baseSize, minSize) {
   return { font: shrink, lines: [text] };
 }
 
-// --- Hybrid Layout: vertical progression, horizontal bands for children ---
+// --- Hybrid Layout: vertical main flow, horizontal children with wrapping ---
 
-function bandChildren(children) {
+function wrapChildren(children, maxPerRow = 4) {
+  // Split children into rows of maxPerRow
   if (!children || children.length === 0) return [];
-  const bandHeight = Math.ceil(Math.sqrt(children.length));
-  const bands = [];
-  for (let i = 0; i < children.length; i += bandHeight) {
-    bands.push(children.slice(i, i + bandHeight));
+  const rows = [];
+  for (let i = 0; i < children.length; i += maxPerRow) {
+    rows.push(children.slice(i, i + maxPerRow));
   }
-  return bands;
+  return rows;
 }
 
 function measureTree(node, opts) {
   const boxW = node.big ? 140 : (opts.branchBoxW || 220);
   const boxH = node.big ? 70 : (opts.branchBoxH || 46);
-  if (!node.children && !node.band) {
-    return { width: boxW, height: boxH, node, children: [], boxW, boxH };
+  if (!node.children || node.children.length === 0) {
+    return { width: boxW, height: boxH, node, childrenRows: [], boxW, boxH };
   }
-  if (node.band) {
-    // Band nodes: horizontal row of nodes, then continue vertical flow below the band
-    const bandRects = node.band.map(child => measureTree(child, opts));
-    let totalBandW = bandRects.reduce((a, b) => a + b.width, 0) + (bandRects.length - 1) * opts.hSpacing;
-    let bandH = Math.max(...bandRects.map(r => r.height));
-    let width = Math.max(boxW, totalBandW);
-    let height = boxH + opts.vSpacing + bandH;
-    // Add extra vertical for .children below the band, if any
-    let childrenRect = null;
-    if (node.children && node.children.length > 0) {
-      childrenRect = measureTree({label: null, children: node.children}, opts);
-      height += opts.vSpacing + childrenRect.height;
-      width = Math.max(width, childrenRect.width);
-    }
-    return {
-      width, height, node, band: bandRects, childrenRect, boxW, boxH
-    };
-  }
-  if (node.children && node.children.length > 0) {
-    // Standard: children are a vertical stack
-    let childrenRects = node.children.map(child => measureTree(child, opts));
-    let width = Math.max(boxW, ...childrenRects.map(r => r.width));
-    let height = boxH + opts.vSpacing + childrenRects.reduce((a, r) => a + r.height, 0) + (childrenRects.length - 1) * opts.vSpacing;
-    return {
-      width, height, node, children: childrenRects, boxW, boxH
-    };
-  }
-  return { width: boxW, height: boxH, node, children: [], boxW, boxH };
+  // Arrange children in rows, wrapping as needed
+  const maxPerRow = 4; // or calculate by width
+  const rows = wrapChildren(node.children, maxPerRow);
+  const childrenRows = rows.map(row =>
+    row.map(child => measureTree(child, opts))
+  );
+  // Each row: horizontal, stacked vertically
+  const rowWidths = childrenRows.map(rowRects =>
+    rowRects.reduce((a, b) => a + b.width, 0) + (rowRects.length - 1) * opts.hSpacing
+  );
+  const rowHeights = childrenRows.map(rowRects =>
+    Math.max(...rowRects.map(r => r.height))
+  );
+  const bandW = Math.max(boxW, ...rowWidths);
+  const bandH = rowHeights.reduce((a, h) => a + h, 0) + (rowHeights.length - 1) * opts.vSpacing;
+  const width = bandW;
+  const height = boxH + (childrenRows.length > 0 ? opts.vSpacing + bandH : 0);
+  return {
+    width, height, node, childrenRows, rowWidths, rowHeights, boxW, boxH
+  };
 }
 
 function renderTree(x, y, rect, opts, elements, parentCenter = null) {
-  const { node, children, band, childrenRect, boxW, boxH } = rect;
+  const { node, childrenRows, rowWidths, rowHeights, boxW, boxH } = rect;
   let nodeX = x + (rect.width - boxW) / 2;
   let nodeY = y;
-
-  // Draw box and label if not a null node
-  if (node.label !== null) {
-    elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
-    let label = node.label || "";
-    if (node.big && node.count > 1) label += ` ×${node.count}`;
-    let fontSize = node.big ? 48 : 24;
-    const fit = fitText(label, boxW - 18, fontSize, 13);
-    if (fit.lines.length === 1) {
-      elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
-    } else {
-      elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
-      elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[1]}</text>`);
-    }
-    // Connect to parent
-    if (parentCenter) {
-      elements.push(`<path d="M${parentCenter.x} ${parentCenter.y} L${nodeX + boxW / 2} ${nodeY}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
-    }
+  // Draw box and label
+  elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
+  let label = node.label || "";
+  if (node.big && node.count > 1) label += ` ×${node.count}`;
+  let fontSize = node.big ? 48 : 24;
+  const fit = fitText(label, boxW - 18, fontSize, 13);
+  if (fit.lines.length === 1) {
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+  } else {
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[0]}</text>`);
+    elements.push(`<text x="${nodeX + boxW / 2}" y="${nodeY + boxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${node.big ? "bold" : "normal"}">${fit.lines[1]}</text>`);
   }
-
-  // Render band (horizontal row of nodes)
-  if (band) {
-    let totalBandW = band.reduce((a, b) => a + b.width, 0) + (band.length - 1) * opts.hSpacing;
-    let bandStartX = x + (rect.width - totalBandW) / 2;
-    let bandY = nodeY + boxH + opts.vSpacing;
-    // Draw arrows from parent to each band node
-    for (let i = 0, bcx = bandStartX; i < band.length; ++i) {
-      let b = band[i];
-      // Parent arrow to each child in band
-      elements.push(`<path d="M${nodeX + boxW / 2} ${nodeY + boxH} L${bcx + b.width/2} ${bandY}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
-      renderTree(bcx, bandY, b, opts, elements, null);
-      bcx += b.width + opts.hSpacing;
-    }
-    // After band, continue single flow vertically from center of band
-    if (childrenRect) {
-      let bandCenterX = bandStartX + totalBandW / 2;
-      let bandBottomY = bandY + Math.max(...band.map(b => b.height));
-      // Arrow from band center down to next node
-      elements.push(`<path d="M${bandCenterX} ${bandBottomY} L${bandCenterX} ${bandBottomY + opts.vSpacing}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
-      renderTree(bandCenterX - childrenRect.width/2, bandBottomY + opts.vSpacing, childrenRect, opts, elements, null);
-    }
-    return;
+  // Connect to parent
+  if (parentCenter) {
+    elements.push(`<path d="M${parentCenter.x} ${parentCenter.y} L${nodeX + boxW / 2} ${nodeY}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
   }
-
-  // Render children (vertical stack)
-  if (children && children.length > 0) {
+  // Render children in rows
+  if (childrenRows && childrenRows.length > 0) {
     let cy = nodeY + boxH + opts.vSpacing;
-    for (let i = 0; i < children.length; ++i) {
-      let ch = children[i];
-      let cx = x + (rect.width - ch.width) / 2;
-      // Arrow from parent to first child only
-      if (i === 0 && node.label !== null) {
+    for (let r = 0; r < childrenRows.length; ++r) {
+      let row = childrenRows[r];
+      let rowW = rowWidths[r];
+      let rowH = rowHeights[r];
+      let cx = x + (rect.width - rowW) / 2;
+      for (let i = 0; i < row.length; ++i) {
+        let ch = row[i];
+        // Arrow from parent to each child
         elements.push(`<path d="M${nodeX + boxW / 2} ${nodeY + boxH} L${cx + ch.width/2} ${cy}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
+        renderTree(cx, cy, ch, opts, elements, null);
+        cx += ch.width + opts.hSpacing;
       }
-      renderTree(cx, cy, ch, opts, elements, null);
-      cy += ch.height + opts.vSpacing;
+      cy += rowH + opts.vSpacing;
     }
   }
 }
