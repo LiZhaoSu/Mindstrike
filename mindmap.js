@@ -1,4 +1,4 @@
-// Mindmap Generator: Clean branching, minimal repeats, correct border scaling
+// Mindmap Generator: Clean branching, no duplicate text, auto-fit text, draggable map
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -18,7 +18,6 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   return null;
 }
 
-// Find repeated blocks for lyrics (returns array of block {start, end, length, textArr, count})
 function findRepeatedBlocks(lines, minBlockLen=2) {
   const blocks = [];
   const blockMap = {};
@@ -31,7 +30,6 @@ function findRepeatedBlocks(lines, minBlockLen=2) {
   }
   Object.entries(blockMap).forEach(([block, indices]) => {
     if (indices.length > 1) {
-      // Only keep non-overlapping blocks
       indices.forEach(idx => {
         let overlaps = blocks.some(b =>
           (idx >= b.start && idx < b.end) ||
@@ -106,12 +104,27 @@ function buildBranchingMindmapTree(lyrics) {
     }
   });
 
-  // Detect stems for partial repeats/branches
-  const stems = detectStems(lyricLines, 2, 3);
+  // Detect stems for partial repeats/branches (also keep word count)
+  const stems = [];
+  lyricLines.forEach((line, idx) => {
+    const words = line.trim().split(/\s+/);
+    for (let w = 3; w >= 2; w--) {
+      if (words.length >= w) {
+        const stem = words.slice(0, w).join(" ").toLowerCase();
+        let found = stems.find(s => s.stem === stem);
+        if (!found) stems.push({ stem, idxArr: [idx], words: w });
+        else found.idxArr.push(idx);
+        break;
+      }
+    }
+  });
+  // Filter: only stems with at least 2 lines, prefer longest possible
+  const stemGroups = stems.filter(s => s.idxArr.length >= 2)
+    .sort((a, b) => b.words - a.words); // prefer longer stems
 
-  // Build branches: show repeated block only at first position with repeat mark, not elsewhere
-  const branches = [];
+  // Track which lines are already grouped
   const usedIdx = new Set();
+  const branches = [];
 
   for (let i = 0; i < lines.length; ++i) {
     if (usedIdx.has(i)) continue;
@@ -126,7 +139,7 @@ function buildBranchingMindmapTree(lyrics) {
       continue;
     }
 
-    // Check if this is the start of a repeated block
+    // Check for repeated block
     let block = repeatedBlocks.find(b => b.start === i && blockFirstOccurrence[b.block] === i);
     if (block) {
       branches.push({
@@ -151,16 +164,26 @@ function buildBranchingMindmapTree(lyrics) {
       continue;
     }
 
-    // Try to group as a stem (parallel structure)
-    const stemEntry = stems.find(stemObj => stemObj.idxArr.includes(i) && stemObj.idxArr[0] === i);
-    if (stemEntry) {
+    // Try to group as a stem (prefer longest match, and only if the lines are not already grouped)
+    let stemObj = stemGroups.find(stemObj =>
+      stemObj.idxArr.includes(i) &&
+      stemObj.idxArr.filter(idx => !usedIdx.has(idx)).length >= 2 &&
+      stemObj.idxArr[0] === i
+    );
+    if (stemObj) {
       branches.push({
-        label: lines[i].text.split(/\s+/).slice(0, 3).join(" "),
-        children: stemEntry.idxArr.map(idx => ({
-          label: lines[idx].text
-        }))
+        label: stemObj.stem,
+        children: stemObj.idxArr
+          .filter(idx => !usedIdx.has(idx))
+          .map(idx => {
+            const line = (lines[idx].type === "lyric" ? lines[idx].text : "");
+            // Remove the stem from the start to get the suffix
+            let suffix = line.trim().split(/\s+/).slice(stemObj.words).join(" ");
+            if (!suffix) suffix = "(...)";
+            return { label: suffix };
+          })
       });
-      stemEntry.idxArr.forEach(idx => usedIdx.add(idx));
+      stemObj.idxArr.forEach(idx => usedIdx.add(idx));
       continue;
     }
 
@@ -177,7 +200,32 @@ function buildBranchingMindmapTree(lyrics) {
   };
 }
 
-// SVG Renderer for branching lyrics mindmap, proper scaling
+// Helper: fit text to box, shrink font if needed
+function fitText(text, maxW, baseSize, minSize) {
+  // Estimate width: assume average character 0.6em
+  const estW = text.length * baseSize * 0.62 + 18;
+  if (estW <= maxW) return { font: baseSize, lines: [text] };
+  // Try to split to two lines if possible
+  if (text.length > 18) {
+    let idx = Math.floor(text.length / 2);
+    // Find a space near the middle
+    for (let off = 0; off < 8; ++off) {
+      if (text[idx - off] === " ") { idx = idx - off; break; }
+      if (text[idx + off] === " ") { idx = idx + off; break; }
+    }
+    let lines = [text.slice(0, idx).trim(), text.slice(idx).trim()];
+    let estW1 = Math.max(lines[0].length, lines[1].length) * baseSize * 0.62 + 18;
+    if (estW1 <= maxW) return { font: baseSize, lines };
+    // Shrink font if still too wide
+    let shrink = Math.max(minSize, baseSize * maxW / estW1);
+    return { font: shrink, lines };
+  }
+  // Otherwise, just shrink font
+  let shrink = Math.max(minSize, baseSize * maxW / estW);
+  return { font: shrink, lines: [text] };
+}
+
+// SVG Renderer for branching lyrics mindmap, proper scaling, fit text, draggable
 function renderMindmap(mindmap) {
   const svgNS = 'http://www.w3.org/2000/svg';
   const rootW = 500, rootH = 72;
@@ -229,7 +277,14 @@ function renderMindmap(mindmap) {
 
     let showLabel = (branch.label !== undefined);
     if (showLabel) {
-      elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fontSize / 3 - 4}" font-size="${fontSize}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${branchLabel}</text>`);
+      const fit = fitText(branchLabel, bbW - 20, fontSize, 15);
+      if (fit.lines.length === 1) {
+        elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[0]}</text>`);
+      } else {
+        // Two lines
+        elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 - 5}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[0]}</text>`);
+        elements.push(`<text x="${bx + bbW / 2}" y="${by + bbH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle" font-weight="${fontWeight}">${fit.lines[1]}</text>`);
+      }
     }
 
     // Repeat mark for blocks (not for discourse marker)
@@ -246,9 +301,15 @@ function renderMindmap(mindmap) {
       let startCy = by + bbH / 2 - childrenTotalH / 2;
       branch.children.forEach((child, j) => {
         let cx = bx + bbW + hSpacing, cy = startCy + j * (childBoxH + 7);
-        const cb = `<rect x="${cx}" y="${cy}" width="${childBoxW}" height="${childBoxH}" rx="7" fill="#fff" stroke="#222" stroke-width="1.8"/>`;
-        const ct = `<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + 8}" font-size="19" font-family="sans-serif" text-anchor="middle">${child.label}</text>`;
-        elements.push(cb, ct);
+        const fit = fitText(child.label, childBoxW - 16, 19, 11);
+        elements.push(`<rect x="${cx}" y="${cy}" width="${childBoxW}" height="${childBoxH}" rx="7" fill="#fff" stroke="#222" stroke-width="1.8"/>`);
+        if (fit.lines.length === 1) {
+          elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + fit.font / 3 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[0]}</text>`);
+        } else {
+          // Two lines
+          elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 - 4}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[0]}</text>`);
+          elements.push(`<text x="${cx + childBoxW / 2}" y="${cy + childBoxH / 2 + fit.font + 2}" font-size="${fit.font}" font-family="sans-serif" text-anchor="middle">${fit.lines[1]}</text>`);
+        }
         // Connector from branch to child
         elements.push(`<path d="M${bx + bbW} ${by + bbH / 2} L${cx} ${cy + childBoxH / 2}" stroke="#222" fill="none" marker-end="url(#arr)"/>`);
       });
@@ -263,7 +324,11 @@ function renderMindmap(mindmap) {
 
   // SVG marker
   const marker = `<defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M2,2 L7,4 L2,6 L4,4 L2,2" style="fill: #222;" /></marker></defs>`;
-  return `<svg width="${svgW}" height="${svgH}" xmlns="${svgNS}" style="background:#efefef">${marker}${elements.join('\n')}</svg>`;
+  // Wrap in group for pan/drag
+  return `
+  <div id="mindmapSvgWrapper" style="width:100%;height:700px;overflow:auto;cursor:grab;">
+  <svg id="mindmapSvg" width="${svgW}" height="${svgH}" xmlns="${svgNS}" style="background:#efefef;user-select:none">${marker}${elements.join('\n')}</svg>
+  </div>`;
 }
 
 function generateMindmap() {
@@ -275,6 +340,32 @@ function generateMindmap() {
   const mindmap = buildBranchingMindmapTree(lyrics);
   const svg = renderMindmap(mindmap);
   document.getElementById('mindmapArea').innerHTML = svg;
+
+  // Add drag-to-pan logic
+  setTimeout(() => {
+    const wrapper = document.getElementById("mindmapSvgWrapper");
+    const svgEl = document.getElementById("mindmapSvg");
+    if (!wrapper || !svgEl) return;
+    let isDown = false, startX = 0, startY = 0, scrollLeft = 0, scrollTop = 0;
+    wrapper.onmousedown = function(e) {
+      isDown = true;
+      wrapper.style.cursor = 'grabbing';
+      startX = e.pageX - wrapper.offsetLeft;
+      startY = e.pageY - wrapper.offsetTop;
+      scrollLeft = wrapper.scrollLeft;
+      scrollTop = wrapper.scrollTop;
+    };
+    wrapper.onmouseleave = function() { isDown = false; wrapper.style.cursor = 'grab';};
+    wrapper.onmouseup = function() { isDown = false; wrapper.style.cursor = 'grab';};
+    wrapper.onmousemove = function(e) {
+      if (!isDown) return;
+      e.preventDefault();
+      const x = e.pageX - wrapper.offsetLeft;
+      const y = e.pageY - wrapper.offsetTop;
+      wrapper.scrollLeft = scrollLeft - (x - startX);
+      wrapper.scrollTop = scrollTop - (y - startY);
+    };
+  }, 100);
 }
 
 document.addEventListener("DOMContentLoaded", function() {
