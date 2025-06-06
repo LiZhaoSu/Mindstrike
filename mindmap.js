@@ -1,4 +1,4 @@
-// Mindmap Generator: Clean recursive branching, grid-like layout, like the Hey Jude example
+// Mindmap Generator: Hybrid vertical/horizontal layout, clean and complete
 
 function normalizeLine(line) {
   return line.replace(/[^a-zA-Z0-9' ]+/g, '').trim().toLowerCase();
@@ -18,6 +18,7 @@ function isDiscourseMarkerLine(line, markerList=DISCOURSE_MARKERS) {
   return null;
 }
 
+// Build the mindmap tree: recursively group by stems & maintain full order
 function buildMindmapTree(lyrics) {
   const rawLines = lyrics.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.match(/^\[.*\]$/));
   if (rawLines.length === 0) return { label: "Song", children: [] };
@@ -40,12 +41,13 @@ function buildMindmapTree(lyrics) {
     }
   }
 
-  // Now: recursively group by stems (3, then 2 words) for horizontal branching,
-  // and avoid repeated child nodes.
-  function groupByStem(nodes, minCount = 2) {
+  // Helper: recursively group by stems at each vertical level
+  function groupByStem(nodes, minCount = 2, stemWindow = [3,2]) {
+    // nodes is an array of lyric/discourse nodes; returns [{label, children, ...}]
     if (nodes.length <= 1) return nodes.map(n => ({ ...n }));
-    // Try to group by 3-word, then 2-word stems
-    for (let stemLen = 3; stemLen >= 2; stemLen--) {
+
+    for (let stemLen of stemWindow) {
+      // 1. Group by stems
       const stemGroups = {};
       nodes.forEach((node, idx) => {
         if (node.type === "lyric") {
@@ -57,31 +59,38 @@ function buildMindmapTree(lyrics) {
           }
         }
       });
-      // Only keep stems with at least minCount lines, and not all lines (to avoid grouping everything)
+      // Only keep stems with at least minCount lines and not all lines (so we don't group everything)
       const validStems = Object.entries(stemGroups)
         .filter(([stem, idxArr]) => idxArr.length >= minCount && idxArr.length < nodes.length);
       if (validStems.length > 0) {
-        // Group by these stems
         const usedIdx = new Set();
         const result = [];
+        // For each stem group, create a parent node and horizontally arrange children
         validStems.forEach(([stem, idxArr]) => {
-          // Children: unique suffixes only
+          // Deduplicate suffixes
           const seen = new Set();
-          const children = idxArr.map(idx => {
+          const children = [];
+          idxArr.forEach(idx => {
             const node = nodes[idx];
             const words = node.text.trim().split(/\s+/);
             let suffix = words.slice(stemLen).join(" ");
             if (!suffix) suffix = "(...)";
             const normSuffix = normalizeLine(suffix);
-            if (seen.has(normSuffix)) return null;
-            seen.add(normSuffix);
-            // Allow further grouping within the suffixes
-            return { label: suffix, ...node, text: undefined, children: groupByStem([node], minCount) };
-          }).filter(Boolean);
-          result.push({ label: stem, children });
+            if (!seen.has(normSuffix)) {
+              // Recursively group children beneath the suffix (to allow deeper branching)
+              children.push(
+                groupByStem(
+                  [ { ...node, text: suffix, type: "lyric" } ], 
+                  minCount, stemWindow
+                )[0]
+              );
+              seen.add(normSuffix);
+            }
+          });
+          result.push({ label: stem, children: children });
           idxArr.forEach(idx => usedIdx.add(idx));
         });
-        // Any unused nodes are added as is (possibly further grouped)
+        // Add unused nodes vertically under this group
         nodes.forEach((node, idx) => {
           if (!usedIdx.has(idx)) {
             if (node.type === "lyric") result.push({ label: node.text });
@@ -92,7 +101,7 @@ function buildMindmapTree(lyrics) {
         return result;
       }
     }
-    // No valid stems, just return nodes as is (lyrics or discourse)
+    // If no valid stems, just return nodes as is (lyrics or discourse)
     return nodes.map(node => {
       if (node.type === "lyric") return { label: node.text };
       if (node.type === "discourse") return { label: node.marker, big: true, count: node.count };
@@ -134,42 +143,46 @@ function fitText(text, maxW, baseSize, minSize) {
   return { font: shrink, lines: [text] };
 }
 
-// Calculate subtree sizes and positions recursively
+// Recursive layout: each vertical group gets stacked, each node's children are laid out horizontally
 function measureTree(node, opts) {
-  // Returns { width, height, node, children: [ ... ] }
-  // Each node is a box, children arranged horizontally
+  // node: {label, children, ...}
+  // Returns { x, y, width, height, node, children: [...] }
   const boxW = node.big ? 140 : (opts.branchBoxW || 220);
   const boxH = node.big ? 70 : (opts.branchBoxH || 46);
+
   if (!node.children || node.children.length === 0) {
-    return { width: boxW, height: boxH, node, children: [] };
+    return { width: boxW, height: boxH, node, children: [], boxW, boxH, x: 0, y: 0 };
   }
-  // Compute children sizes
-  const childRects = node.children.map(child => measureTree(child, opts));
-  // Arrange children horizontally
-  const childrenWidth =
-    childRects.reduce((a, b) => a + b.width, 0) +
-    opts.hSpacing * (childRects.length - 1);
-  const width = Math.max(boxW, childrenWidth);
-  const height =
-    boxH + opts.vSpacing + (childRects.length > 0 ? Math.max(...childRects.map(c => c.height)) : 0);
+
+  // Children: arrange horizontally, but sibling groups are stacked vertically
+  // So, gather subgroups: if children have children, render horizontally as a block, then stack
+  let childrenRects = [];
+  node.children.forEach(child => {
+    childrenRects.push(measureTree(child, opts));
+  });
+
+  // We want: stack each sibling vertically, but for each, lay out its children horizontally
+  // Actually, at this level, all children are siblings, so lay out horizontally under this node
+  const hSpacing = opts.hSpacing;
+  const totalChildrenWidth =
+    childrenRects.reduce((a, b) => a + b.width, 0) +
+    hSpacing * (childrenRects.length - 1);
+  const width = Math.max(boxW, totalChildrenWidth);
+  const height = boxH + (childrenRects.length > 0 ? opts.vSpacing + Math.max(...childrenRects.map(c => c.height)) : 0);
+
   return {
-    width,
-    height,
-    node,
-    children: childRects,
-    childrenWidth,
-    boxW,
-    boxH
+    width, height, node, children: childrenRects, boxW, boxH, x: 0, y: 0
   };
 }
 
-// Render node and its children recursively
+// Render the tree recursively: stack siblings vertically, lay out children horizontally
 function renderTree(x, y, rect, opts, elements, parentCenter = null) {
   const { node, children, boxW, boxH } = rect;
-  // Center current node horizontally above/below its children
+  // Center current node horizontally above its children
   let nodeX = x + (rect.width - boxW) / 2;
   let nodeY = y;
-  // Box and label
+
+  // Draw box and label
   elements.push(`<rect x="${nodeX}" y="${nodeY}" width="${boxW}" height="${boxH}" rx="9" fill="#fff" stroke="#222" stroke-width="2"/>`);
   let label = node.label || "";
   if (node.big && node.count > 1) label += ` ×${node.count}`;
@@ -189,8 +202,8 @@ function renderTree(x, y, rect, opts, elements, parentCenter = null) {
   if (children && children.length > 0) {
     let cx = x;
     let cy = nodeY + boxH + opts.vSpacing;
+    // Layout children horizontally (side by side, not stacked)
     children.forEach(childRect => {
-      // Center parent's bottom middle to child's top middle
       renderTree(cx, cy, childRect, opts, elements, {
         x: nodeX + boxW / 2,
         y: nodeY + boxH
